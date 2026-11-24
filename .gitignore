@@ -1,0 +1,55 @@
+# Ignore the local Beads workspace and all of its contents.
+.beads/
+
+# Node.js / TypeScript / JavaScript
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache/
+.pnp.*
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+coverage/
+.next/
+.nuxt/
+.output/
+.svelte-kit/
+.turbo/
+*.tsbuildinfo
+.eslintcache
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+
+# Rust
+target/
+*.rs.bk
+
+# Common generated artifacts and OS files
+dist/
+build/
+*.log
+.DS_Store
+Thumbs.db
+
+# Local external-project symlink
+/AI-Story
+
+# Local-only per-topology docs (design records, plans); root docs/ stays tracked
+/topologies/*/docs/

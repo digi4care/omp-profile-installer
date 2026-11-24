@@ -1,0 +1,182 @@
+# Publishes a signed GitHub Release for the Rust omp-topology CLI.
+#
+# Trigger: push a SemVer tag, e.g. `git tag v0.2.0 && git push origin v0.2.0`.
+# Full maintainer instructions live in RELEASING.md; this header summarizes
+# the trust model.
+#
+# Trust model (fail closed, no unsigned fallback anywhere):
+#   - Every release publishes `SHA256SUMS` plus a detached RSA/SHA-256
+#     signature `SHA256SUMS.sig` over that file.
+#   - Only the public half of the release key is committed, at
+#     keys/omp-topology-release-public.pem. The private key lives solely in
+#     the `OMP_TOPOLOGY_RELEASE_PRIVATE_KEY` GitHub Actions secret.
+#   - The release job aborts (before anything is published) if the secret is
+#     missing/empty, if the key does not parse, or if the freshly created
+#     signature does not verify against the committed public PEM — which also
+#     catches a secret/public-key mismatch.
+#
+# Targets (native runners only; no cross-compilation, no unproven targets):
+#   x86_64-unknown-linux-musl   ubuntu-latest    (static musl; no glibc dependency)
+#   x86_64-apple-darwin         macos-15-intel   (Intel; macos-13 was retired)
+#   aarch64-apple-darwin        macos-15         (Apple Silicon)
+name: Release
+
+on:
+  push:
+    tags:
+      # Glob syntax (not regex): any v-prefixed tag; the build job below
+      # strictly validates the `vMAJOR.MINOR.PATCH` shape.
+      - "v*"
+
+permissions:
+  # Least privilege by default: only the release job gets write access,
+  # and only the release job receives the signing secret.
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            musl: true
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl C toolchain (Linux static builds)
+        if: ${{ matrix.musl }}
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Validate tag shape and Cargo.toml version match
+        run: |
+          set -eu
+          if ! printf '%s' "$GITHUB_REF_NAME" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::tag '${GITHUB_REF_NAME}' is not a vMAJOR.MINOR.PATCH release tag" >&2
+            exit 1
+          fi
+          crate_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          if [ "v${crate_version}" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Cargo.toml version '${crate_version}' does not match tag '${GITHUB_REF_NAME}'" >&2
+            exit 1
+          fi
+
+      - name: Build release binary
+        # Route the musl target's link step through musl-gcc so the binary is
+        # genuinely linked against musl (static), not the host glibc toolchain.
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Verify binary runs and reports its version
+        run: |
+          set -eu
+          bin="target/${{ matrix.target }}/release/omp-topology"
+          test -x "$bin"
+          "$bin" --version
+
+      - name: Package artifact
+        # macOS runners lack GNU coreutils: hash with the stock `shasum`
+        # there, keep `sha256sum` on Linux. Both emit the same
+        # "<hash>  <file>" line format.
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          asset="omp-topology-${version}-${{ matrix.target }}.tar.gz"
+          tar -C "target/${{ matrix.target }}/release" -czf "$asset" omp-topology
+          if [ "$(uname -s)" = "Darwin" ]; then
+            shasum -a 256 "$asset"
+          else
+            sha256sum "$asset"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: omp-topology-*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: publish signed release assets
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check installer embedded key matches committed public key
+        run: |
+          set -eu
+          embedded="$(mktemp)"
+          trap 'rm -f "$embedded"' EXIT
+          awk '/-----BEGIN PUBLIC KEY-----/{f=1} f{print} /-----END PUBLIC KEY-----/{f=0}' \
+            scripts/install-release.sh > "$embedded"
+          cmp "$embedded" keys/omp-topology-release-public.pem || {
+            echo "::error::embedded public key in scripts/install-release.sh does not match keys/omp-topology-release-public.pem" >&2
+            exit 1
+          }
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: sha256sum omp-topology-*.tar.gz | sort -k 2 > SHA256SUMS
+
+      - name: Sign SHA256SUMS (fail closed on missing/invalid secret)
+        env:
+          OMP_TOPOLOGY_RELEASE_PRIVATE_KEY: ${{ secrets.OMP_TOPOLOGY_RELEASE_PRIVATE_KEY }}
+        run: |
+          set -eu
+          if [ -z "$OMP_TOPOLOGY_RELEASE_PRIVATE_KEY" ]; then
+            echo "::error::OMP_TOPOLOGY_RELEASE_PRIVATE_KEY secret is missing or empty; see RELEASING.md" >&2
+            exit 1
+          fi
+          umask 077
+          tmpkey="$(mktemp)"
+          trap 'rm -f "$tmpkey"' EXIT
+          printf '%s\n' "$OMP_TOPOLOGY_RELEASE_PRIVATE_KEY" > "$tmpkey"
+          if ! openssl pkey -in "$tmpkey" -noout -check > /dev/null 2>&1; then
+            echo "::error::OMP_TOPOLOGY_RELEASE_PRIVATE_KEY does not contain a valid private key" >&2
+            exit 1
+          fi
+          openssl dgst -sha256 -sign "$tmpkey" -out dist/SHA256SUMS.sig dist/SHA256SUMS
+
+      - name: Verify signature against the committed public key
+        run: |
+          set -eu
+          if ! openssl dgst -sha256 -verify keys/omp-topology-release-public.pem \
+              -signature dist/SHA256SUMS.sig dist/SHA256SUMS; then
+            echo "::error::signature verification failed; release aborted before publish" >&2
+            exit 1
+          fi
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release create "$GITHUB_REF_NAME" \
+            dist/SHA256SUMS dist/SHA256SUMS.sig dist/*.tar.gz \
+            --verify-tag --generate-notes

@@ -1,0 +1,51 @@
+# Changelog
+
+All notable changes to this project are documented here.
+
+## [Unreleased]
+
+### Added
+
+- Target the agent directory of a topology's metadata `profile` (resolved
+  via `omp --profile NAME config path` as an argument vector) for both
+  `install` and `remove`; topologies without a metadata profile keep the
+  legacy `omp config path` behavior.
+- Add `--profile NAME` to `install` and `remove` to override the metadata
+  profile; it is mutually exclusive with `--agent-dir`, which remains an
+  explicit path override that also overrides the metadata profile.
+- When the topology source was deleted after installing, `remove` falls
+  back to the legacy active-profile directory instead of requiring the
+  metadata profile.
+- Assign `digital-product-studio` its own OMP profile and bump the topology to
+  `2.0.0`. The previous default-profile installation is retained until the
+  operator verifies the new profile and explicitly removes the old overlay.
+- Add local and GitHub topology discovery, profile installation, aliases, and lifecycle management to the Rust CLI.
+- Add signed Linux/macOS release automation and signature-verified install/self-update.
+
+### Changed
+
+- Preserve user-edited state during updates and keep incomplete-rollback recovery snapshots until reconciliation.
+- Protect cached GitHub checkouts from pruning while commands are using them.
+- Remove now deletes a `config.yml` the installer created from an absent file once its topology-owned keys are resolved away and no other content remains.
+- Refuse incompatible config value types before any install mutation, including before the registry lock creates state.
+- Adopt a byte-identical pre-existing file behind a supported main->topology link instead of refusing as a collision; record it as pre-existing so remove and source drops never delete it.
+- Release pre-existing adopted files from the ownership manifest during remove without deleting them or counting them as conflicts, and reject malformed `preexisting` manifest metadata before any mutation.
+- Track config-link merge ownership explicitly (`config_link_merge`) so a candidate-only link history no longer defeats profile precedence on a later `--config-merge`; existing profile values keep winning until a merge run actually reconciled them.
+- Keep a valid `config_replace` backup across candidate and merge updates so remove can still restore the pre-replacement config; only a later explicit `--config-replace` supersedes it.
+- Canonicalize the actual `~/.omp` root in profile-link resolution and require the canonical profiles root and link target beneath it, so a `profiles` symlink redirecting outside the OMP root is rejected even when every lexical check passes.
+
+## [0.2.0] - 2026-11-20
+
+### Added
+
+- Add optional `--skills-dir` to install charter skills in a separate directory.
+- Record both roots so removal can safely manage an external skills location.
+- Keep v0.1.0 single-root ownership manifests removable.
+
+## [0.1.0] - 2026-11-20
+
+### Added
+
+- Add the `omp-topology` CLI with `list`, `install`, `remove`, `--dry-run`, and `--version` commands.
+- Add semantic config merging, collision protection, restricted backups, and edit-aware removal with retryable conflict handling.
+- Add `digital-product-studio` topology metadata at version `1.0.0` and installer contract tests.

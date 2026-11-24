@@ -1,0 +1,23 @@
+[package]
+name = "omp-topology"
+version = "0.2.0"
+edition = "2024"
+description = "Install and manage OMP topology profiles"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+# Lossless YAML editing: preserves user comments/formatting during config
+# merge and removal restore; `migrate::to_yaml_1_2` keeps YAML 1.1 scalar
+# meanings (e.g. the topology fixture's `autoParallel: on` stays boolean).
+yaml-edit = { version = "0.3.6", default-features = false }
+serde_json = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+percent-encoding = "2"
+# Descriptor-anchored filesystem operations (openat family, O_NOFOLLOW):
+# the TOCTOU mitigation pins directory descriptors once per command and
+# performs every mutation and read-verification relative to them. Direct
+# libc binding; the lockfile already carries 0.2.191.
+libc = "0.2"
