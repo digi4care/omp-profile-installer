@@ -28,9 +28,9 @@ The main agent owns decomposition and integration:
   them out in one batch, and require concise reports back (findings/decisions,
   not transcripts).
 - Obtain user approval of the product brief before delegating build work;
-  do not start downstream/build execution on an unapproved brief. Product
-  & Strategy (`product-strategy`) performs its own in-domain discovery and
-  research to produce the brief — that discovery does not wait for approval.
+  do not start downstream/build execution on an unapproved brief. This gate
+  applies only to new or ambiguous product ideas; direct, bounded requests
+  follow the scope-note process and need no extra approval. Product
 - Integrate results and run final verification once after delegated work.
   Subagents generally do not run gates.
 - The final review checks evidence against every applicable acceptance

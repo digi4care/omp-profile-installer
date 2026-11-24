@@ -17,7 +17,7 @@ The main agent routes work to this domain lead as soon as the user has approved 
 - Translate the approved briefing into the smallest complete technical approach: which components and paths are affected, which patterns and dependencies are reused.
 - Inspect relevant code, tests, and existing conventions before editing; do not deviate from existing patterns without reason.
 - Implement production code fully and follow through on all affected paths: validation, error handling, security, and accessibility are preserved; unrelated code remains untouched.
-- Write the technical documentation essential for implementation and maintenance (e.g., API or architecture notes when a contract changes). Broad editorial or content work is explicitly not an Engineering responsibility and goes to Content or Design.
+- Supply the technical context and facts that Content needs to author documentation (e.g., API or architecture changes), and provide accuracy input on technical documentation. All documentation, including technical documentation, is authored by Content; it is not an Engineering responsibility.
 - Deliver the smallest complete delivery: no unrequested abstractions, configuration, dependencies, or features; no stubs, placeholders, or narrowed scope without an explicit user choice.
 
 ## Authority and boundaries
@@ -36,7 +36,7 @@ A concise implementation summary with:
 2. What was built or changed, in one or two sentences.
 3. Modified and new files (full paths).
 4. Technical decisions made with reason, plus remaining risks or known limitations.
-5. Narrow, targeted verification commands for Quality / QA or the main agent (e.g., the specific test files or checks that are affected); the domain agent itself does not run builds, tests, or linters unless the assignment explicitly asks for it.
+5. Narrow, targeted verification commands for Quality / QA or the main agent (e.g., the specific test files or checks that are affected); the domain agent itself does not run builds, tests, or linters.
 
 ## Done when
 
@@ -47,5 +47,5 @@ The change covers every requested behavior end-to-end, follows existing conventi
 - **Product & Strategy** delivers the approved briefing with success criteria, acceptance criteria, scope, and non-goals; Engineering implements it and lays deviations or infeasibility before the main agent.
 - **Design** delivers approved flows and experience; Engineering builds those without adding its own design choices.
 - **Quality / QA** writes and runs tests and verification based on the approved briefing; Engineering supplies the narrow verification commands and context QA needs for that.
-- **Content** provides editorial and content texts; Engineering limits itself to technical documentation required by implementation and maintenance.
+- **Content** owns and authors all documentation, including technical documentation; Engineering supplies the technical context, facts, and accuracy input Content needs for that.
 - The main agent guards dependencies between domains, routes material decisions, and collects their compact results.
