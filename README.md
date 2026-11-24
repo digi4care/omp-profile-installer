@@ -5,16 +5,30 @@ orchestration rules, and charter skills for
 [OMP](https://github.com/can1357/oh-my-pi) agent configurations,
 installed into named OMP profiles by the `omp-topology` CLI.
 
-## Repository status
+## Repository layout
 
-This repository currently provides the installer and core tooling only
-— the `omp-topology` CLI and its supporting scripts, CI, and
-documentation. No topology payloads ship yet.
+Installable topology payloads live under `topologies/<name>/`, each a
+versioned, self-contained overlay that declares its name, version, and
+description in a `topology.yml` manifest. Each topology is introduced
+through its own pull request, so the set of available topologies grows
+over time without a shared catalog file that every PR must edit.
 
-Topologies will be introduced separately, each through its own pull
-request. The [topologies/README.md](topologies/README.md) index starts
-empty and will list each topology as it lands, with the exact version
-and description taken from that topology's `topology.yml` manifest.
+There is no hand-maintained index: the source tree itself is the
+catalog. Discover the available topologies by browsing the
+`topologies/` directories and their manifests, or by asking the CLI:
+
+```sh
+# From a checkout of this repository
+omp-topology list
+
+# From anywhere, against the published source
+omp-topology list --source github:digi4care/omp-topologies
+```
+
+Add `--json` for machine-readable output. Either form reports every
+installable topology's name, version, and description exactly as
+declared in its manifest — and simply reports none when no topology
+has landed yet.
 
 ## What the tooling does
 
@@ -91,8 +105,8 @@ omp --profile <profile-name> --alias <alias-name>
 
 ## More documentation
 
-- [topologies/README.md](topologies/README.md) — topology index with
-  exact manifest versions and descriptions.
+- [topologies/README.md](topologies/README.md) — how topology
+  payloads are organized and how to discover the available ones.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution, verification, and
   pull-request guidance.
 - [docs/](docs/) — design notes, plans, and research documents.
