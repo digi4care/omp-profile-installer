@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.0] - 2026-11-26
+
+### Changed
+
+- **Breaking:** install `--alias` now delegates real OMP shell-alias creation and requires `--profile`; use `--install-id` for the registry identity and lifecycle selection.
+- Rename registry-facing JSON and human-readable output to `install_id` while retaining the existing on-disk registry schema.
+
+### Fixed
+
+- Check shell-alias PATH collisions without blocking same-install-ID updates, report dry-run alias plans, and prune source caches even when OMP alias creation fails.
+
 ## [0.2.7] - 2026-11-25
 
 ### Added

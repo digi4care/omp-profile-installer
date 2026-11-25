@@ -473,17 +473,14 @@ fn remove_rolls_back_deleted_files_when_config_rewrite_fails() {
         b"#!/bin/sh\ntrap '' XFSZ\nulimit -f 2 || exit 91\nexec \"$OMP_TOPOLOGY_BINARY\" \"$@\"\n",
     )
     .expect("failed to write file-limited command wrapper");
-    let mut permissions = fs::metadata(&wrapper)
-        .expect("failed to inspect command wrapper")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&wrapper, permissions).expect("failed to make command wrapper executable");
-
     let home = temp.0.join("home");
     let xdg_config = temp.0.join("xdg-config");
     fs::create_dir_all(&home).expect("failed to create isolated HOME");
     fs::create_dir_all(&xdg_config).expect("failed to create isolated XDG_CONFIG_HOME");
-    let removed = Command::new(&wrapper)
+    // Reading the just-written wrapper through the shell avoids ETXTBSY
+    // from directly executing it on Docker overlayfs.
+    let removed = Command::new("/bin/sh")
+        .arg(&wrapper)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", xdg_config)
