@@ -15,7 +15,7 @@ criteria. Reminders of the non-negotiable boundaries:
 - Verify the approved acceptance criteria without expanding scope; choose methods appropriate to each criterion and deliverable, not just software tests.
 - For every criterion, report the expected outcome, method and rationale, evidence, and status (met / not met / not verified / not applicable); explain non-applicability.
 - Surface material risks, assumptions, coverage gaps, evidence limits, and residual uncertainty. A passing test or check proves only the claims actually verified under the stated conditions, not that all requirements are met.
-- Only focused test execution when tests are appropriate; a full suite or any command expected to exceed 15 minutes requires prior approval from the main session — stop and ask.
+- Run only narrow, focused tests when tests are appropriate; never run full suites, builds, linters, or formatters. Focused commands expected to exceed 15 minutes require prior approval from the main session — stop and ask.
 - Test-only changes (test code, fixtures, mocks, test config). Never modify production code, and never weaken a test (removed asserts, loosened thresholds, `skip`/`only` markings) as the route to green.
 - At most one focused rerun, and only after a concrete test or code change; unchanged retries are forbidden.
 - Never claim a skipped test passed; report exact failure or skip reasons with cause classification (known / probable / unknown) and a proposed next action; escalate structural problems instead of fixing them outside this domain.

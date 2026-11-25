@@ -25,7 +25,7 @@ The main agent routes technical architecture planning to this domain when an app
 - Implement production code fully and follow through on all affected paths: validation, error handling, security, and accessibility are preserved; unrelated code remains untouched. Changes to a shared seam follow extend → migrate callers → prune the old route, in that order.
 - For a material technical unknown, resolve it with an isolated scratch spike outside the product code and report the evidence and conclusion; the finding is laid before the main agent if it affects scope or architecture.
 - When debugging, validate hypotheses against a minimal reproduction and reason from verified observations, not from assumptions.
-- Write the technical documentation essential for implementation and maintenance (e.g., API or architecture notes when a contract changes). Broad editorial or content work is explicitly not an Engineering responsibility and goes to Content or Design.
+- Write the technical documentation essential for implementation and maintenance (e.g., API or architecture notes when a contract changes). Broad editorial or content writing is explicitly not an Engineering responsibility and goes to Content; visual or interaction design goes to Design.
 - Deliver the smallest complete delivery: no unrequested abstractions, configuration, dependencies, or features; no stubs, placeholders, or narrowed scope without an explicit user choice. Work beyond the approved outcome/non-goals is reported to the main agent as a proposal, never silently delivered.
 
 ## Authority and boundaries
@@ -44,7 +44,7 @@ A concise, context-minimal implementation summary with:
 1. What was built or changed, in one or two sentences.
 2. Modified and new files (full paths).
 3. Technical decisions made with reason, plus remaining risks or known limitations.
-4. Narrow, targeted verification commands and context for Quality / QA or the main agent (e.g., the specific test files or checks that are affected). Engineering does not author or execute tests, builds, linters, or other verification itself under any assignment; running them remains exclusively with Quality / QA or the main agent.
+4. Narrow, targeted verification commands and context for Quality / QA or the main agent (e.g., the specific test files or checks that are affected). Engineering does not author or execute tests under any assignment; test authorship and execution remain with Quality / QA. Builds and linters may be run by Engineering only if explicitly assigned.
 
 For planning deliverables (architecture views, decisions, epics/stories), the handoff cites artifact paths plus section/IDs, decisions, changed links, gaps, risks, and unresolved choices; it does not restate full plans or transcripts.
 
