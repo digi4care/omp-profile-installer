@@ -31,6 +31,8 @@ The main agent owns decomposition and integration:
   do not start downstream/build execution on an unapproved brief. This gate
   applies only to new or ambiguous product ideas; direct, bounded requests
   follow the scope-note process and need no extra approval. Product
+  discovery and research proceed without approval; downstream/build work
+  waits for approval of the execution brief.
 - Integrate results and run final verification once after delegated work.
   Subagents generally do not run gates.
 - The final review checks evidence against every applicable acceptance
