@@ -254,6 +254,17 @@ pub fn preflight_config_types(
     refuse_config_type_conflicts(&topo_model, &user_model)
 }
 
+/// Record an owner alias named by a collision diagnostic, deduplicated
+/// in first-seen order so the recovery guidance built from it is
+/// deterministic. Only collisions recorded in a sibling alias's
+/// ownership manifest have an owner; symlink, link-drift, and unowned
+/// collisions never call this.
+fn note_collision_owner(owners: &mut Vec<String>, owner: &str) {
+    if !owners.iter().any(|existing| existing == owner) {
+        owners.push(owner.to_string());
+    }
+}
+
 /// Refuse unsupported symlink topology and file-name collisions on the
 /// install targets before the caller takes the registry lock: lock
 /// acquisition creates the state home, and a refused install must leave
@@ -374,6 +385,7 @@ pub fn preflight_target_links(
         .map(|(rel, bytes)| (rel.clone(), fsx::sha256_hex(bytes)))
         .collect();
     let mut collisions: Vec<String> = Vec::new();
+    let mut collision_owners: Vec<String> = Vec::new();
     // Supported main->topology links seen at their resolved target, for the
     // same byte-identical adoption exception `run` grants.
     let mut linked_targets: BTreeSet<String> = BTreeSet::new();
@@ -430,6 +442,7 @@ pub fn preflight_target_links(
             continue;
         }
         if let Some(owner) = cross_alias.files.get(rel.as_str()) {
+            note_collision_owner(&mut collision_owners, owner);
             collisions.push(format!(
                 "{rel} already exists and is managed by alias '{owner}'; \
                  refusing to overwrite it"
@@ -487,6 +500,7 @@ pub fn preflight_target_links(
                 .get(&root_string)
                 .and_then(|files| files.get(rel))
             {
+                note_collision_owner(&mut collision_owners, owner);
                 collisions.push(format!(
                     "{rel} already exists under skills root '{}' and is \
                      managed by alias '{owner}'; refusing to overwrite it",
@@ -504,10 +518,20 @@ pub fn preflight_target_links(
         }
     }
     if !collisions.is_empty() {
-        return Err(CliError::Usage(format!(
+        let message = format!(
             "refusing to install: file-name collision:\n  - {}",
             collisions.join("\n  - ")
-        )));
+        );
+        return Err(if collision_owners.is_empty() {
+            // No colliding file has a recorded owner (only symlink or
+            // unowned-file refusals): keep the plain usage diagnostic.
+            CliError::Usage(message)
+        } else {
+            CliError::InstallCollision {
+                message,
+                owners: collision_owners,
+            }
+        });
     }
     Ok(())
 }
@@ -826,6 +850,7 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
         }
     }
     let mut collisions: Vec<String> = Vec::new();
+    let mut collision_owners: Vec<String> = Vec::new();
     // One digest per candidate file: computed once here and reused by the
     // update planning and the transaction record instead of re-hashing.
     let agent_source_hashes: BTreeMap<String, String> = agent_sources
@@ -902,6 +927,7 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
             // this path is a collision naming the owner — even for
             // byte-identical bytes; there is no shared file ownership.
             if let Some(owner) = cross_alias.files.get(rel) {
+                note_collision_owner(&mut collision_owners, owner);
                 collisions.push(format!(
                     "{rel} already exists and is managed by alias '{owner}'; \
                      refusing to overwrite it"
@@ -991,6 +1017,7 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
                     // Sibling alias already manages this skill file: a
                     // collision naming the owner, even for byte-identical
                     // bytes — there is no shared file ownership.
+                    note_collision_owner(&mut collision_owners, owner);
                     collisions.push(format!(
                         "{rel} already exists under skills root '{}' and is \
                          managed by alias '{owner}'; refusing to overwrite it",
@@ -1023,10 +1050,21 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
         }
     }
     if !collisions.is_empty() {
-        return Err(CliError::Usage(format!(
+        let message = format!(
             "refusing to install: file-name collision:\n  - {}",
             collisions.join("\n  - ")
-        )));
+        );
+        return Err(if collision_owners.is_empty() {
+            // No colliding file has a recorded owner (only symlink,
+            // link-drift, or unowned-file refusals): keep the plain
+            // usage diagnostic.
+            CliError::Usage(message)
+        } else {
+            CliError::InstallCollision {
+                message,
+                owners: collision_owners,
+            }
+        });
     }
 
     // ---- files the new topology no longer ships ----

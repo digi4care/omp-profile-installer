@@ -20,6 +20,17 @@ pub enum CliError {
     Manifest(String),
     /// Managed profile registry problems.
     Registry(String),
+    /// A refused install whose file-name collision diagnostics name the
+    /// aliases recorded as owning the colliding files. Renders exactly
+    /// like [`CliError::Usage`]; `owners` lets recovery guidance name an
+    /// actual owner instead of inferring one from the registry.
+    InstallCollision {
+        /// The rendered collision diagnostic (identical to `Usage`).
+        message: String,
+        /// Aliases named as owners by the collision diagnostics, in
+        /// first-seen order.
+        owners: Vec<String>,
+    },
     /// Filesystem failure with the path that caused it.
     Io {
         path: PathBuf,
@@ -34,7 +45,8 @@ impl fmt::Display for CliError {
             | CliError::Topology(message)
             | CliError::Config(message)
             | CliError::Manifest(message)
-            | CliError::Registry(message) => f.write_str(message),
+            | CliError::Registry(message)
+            | CliError::InstallCollision { message, .. } => f.write_str(message),
             CliError::Io { path, source } => {
                 write!(f, "{}: {}", path.display(), source)
             }

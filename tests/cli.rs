@@ -89,6 +89,64 @@ fn help_shows_description_and_version_option() {
         "--help omitted the --version option: {stdout}"
     );
 }
+#[test]
+fn cli_guidance_update_rejects_topology_option_before_state_or_target_access() {
+    let temp = TestDir::new();
+    let default_agent_dir = temp.0.join("default-agent");
+    let blocked_state_home = temp.0.join("blocked-state-home");
+    let state_sentinel = b"state access must not happen\n";
+    fs::write(&blocked_state_home, state_sentinel).expect("failed to block state home");
+
+    let mut command = temp.cli_command(Path::new(env!("CARGO_MANIFEST_DIR")));
+    command.args([
+        "update",
+        "--alias",
+        "omp-dps",
+        "--topology",
+        "digital-product-studio",
+    ]);
+    command.env("XDG_STATE_HOME", &blocked_state_home);
+    temp.configure_fake_omp(&mut command, &default_agent_dir, true);
+
+    let output = command.output().expect("failed to execute omp-topology");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "invalid update option did not return clap exit 2: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Usage:")
+            && stderr.contains("omp-topology update")
+            && stderr.contains("--alias <ALIAS>"),
+        "invalid update option did not show required-alias usage:\n{stderr}"
+    );
+    assert_eq!(
+        fs::read(&blocked_state_home).expect("blocked state sentinel disappeared"),
+        state_sentinel,
+        "invalid update accessed or mutated the blocked state path"
+    );
+    assert!(
+        !default_agent_dir.exists(),
+        "invalid update resolved or created the target before clap rejected the option"
+    );
+}
+
+#[test]
+fn cli_guidance_install_help_explains_alias_and_profile_independence() {
+    let output = run_cli(&["install", "--help"]);
+    assert!(output.status.success(), "install --help failed: {output:?}");
+    let stdout = String::from_utf8(output.stdout).expect("help output was not UTF-8");
+    let lower = stdout.to_ascii_lowercase();
+    assert!(
+        lower.contains("alias does not select a profile"),
+        "install help did not explain that an alias does not select a profile:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("--profile") && stdout.contains("--agent-dir"),
+        "install help omitted --profile or --agent-dir target guidance:\n{stdout}"
+    );
+}
 
 #[test]
 fn version_prints_exact_package_version() {

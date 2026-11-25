@@ -134,14 +134,24 @@ fn run_cli_with_skills(
         .expect("failed to execute omp-topology")
 }
 fn local_topology_source(temp: &TestDir, config: &str, files: &[(&str, &[u8])]) -> PathBuf {
-    let source = temp.0.join("source");
-    let topology = source.join("topologies").join(TOPOLOGY);
+    local_named_topology_source(temp, "source", TOPOLOGY, config, files)
+}
+
+fn local_named_topology_source(
+    temp: &TestDir,
+    source_name: &str,
+    topology_name: &str,
+    config: &str,
+    files: &[(&str, &[u8])],
+) -> PathBuf {
+    let source = temp.0.join(source_name);
+    let topology = source.join("topologies").join(topology_name);
     let agent = topology.join("agent");
     fs::create_dir_all(&agent).expect("failed to create local topology fixture");
     fs::write(
         topology.join("topology.yml"),
         format!(
-            "name: {TOPOLOGY}\nversion: 1.0.0\ndescription: installer fixture\ninstallable: true\n"
+            "name: {topology_name}\nversion: 1.0.0\ndescription: installer fixture\ninstallable: true\n"
         ),
     )
     .expect("failed to write local topology metadata");
@@ -153,6 +163,54 @@ fn local_topology_source(temp: &TestDir, config: &str, files: &[(&str, &[u8])]) 
         fs::write(path, contents).expect("failed to write local topology file");
     }
     source
+}
+
+#[cfg(unix)]
+fn run_cli_with_fake_omp(
+    temp: &TestDir,
+    default_agent_dir: &Path,
+    profile_name: &str,
+    profile_agent_dir: &Path,
+    args: &[&str],
+) -> Output {
+    let bin_dir = temp.0.join("fake-omp-bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create fake PATH");
+    let fake_omp = bin_dir.join("omp");
+    fs::write(
+        &fake_omp,
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"--profile\" ]; then\n\
+         \t[ \"$2\" = \"$OMP_TEST_PROFILE\" ] || exit 64\n\
+         \tshift 2\n\
+         \tif [ \"$1\" = \"config\" ] && [ \"$2\" = \"path\" ]; then\n\
+         \t\tprintf '%s\\n' \"$OMP_TEST_PROFILE_AGENT_DIR\"\n\
+         \t\texit 0\n\
+         \tfi\n\
+         \texit 64\n\
+         fi\n\
+         if [ \"$1\" = \"config\" ] && [ \"$2\" = \"path\" ]; then\n\
+         \tprintf '%s\\n' \"$OMP_TEST_AGENT_DIR\"\n\
+         \texit 0\n\
+         fi\n\
+         exit 64\n",
+    )
+    .expect("failed to write fake omp");
+    fs::set_permissions(&fake_omp, fs::Permissions::from_mode(0o755))
+        .expect("failed to make fake omp executable");
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(bin_dir).chain(std::env::split_paths(&inherited_path)),
+    )
+    .expect("failed to build isolated PATH");
+
+    cli_command(temp, Path::new(env!("CARGO_MANIFEST_DIR")))
+        .args(args)
+        .env("PATH", path)
+        .env("OMP_TEST_AGENT_DIR", default_agent_dir)
+        .env("OMP_TEST_PROFILE", profile_name)
+        .env("OMP_TEST_PROFILE_AGENT_DIR", profile_agent_dir)
+        .output()
+        .expect("failed to execute omp-topology")
 }
 
 fn install_from_source(
@@ -2245,6 +2303,593 @@ fn install_rejects_a_manifest_owned_by_another_topology_without_mutation() {
         fs::read_to_string(manifest)
             .unwrap()
             .contains("another-topology")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_guidance_overlapping_topology_refusal_preserves_state_and_guides_recovery() {
+    let temp = TestDir::new();
+    let default_agent_dir = temp.0.join("default-agent");
+    let profile_agent_dir = temp.0.join("unused-profile-agent");
+    let profile_name = "digital-product-studio-plus";
+    let source_a = local_named_topology_source(
+        &temp,
+        "source-a",
+        TOPOLOGY,
+        "fixture_a: A\n",
+        &[("a.txt", b"topology A")],
+    );
+    let source_a = source_a.to_str().expect("source path is not UTF-8");
+    let installed = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            TOPOLOGY,
+            "--source",
+            source_a,
+            "--alias",
+            "omp-dps",
+        ],
+    );
+    assert_success(&installed);
+
+    let manifest = manifest_path(&temp, &default_agent_dir);
+    let registry = temp.state_home().join("omp-topology/registry.json");
+    let registry_value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry).expect("registry is missing"))
+            .expect("registry is not valid JSON");
+    assert_eq!(
+        registry_value["aliases"]["omp-dps"]["agent_dir"],
+        fs::canonicalize(&default_agent_dir)
+            .expect("default target is missing")
+            .display()
+            .to_string(),
+        "the existing alias does not own the default target"
+    );
+    let target_before = file_snapshot(&default_agent_dir);
+    let state_root = temp.state_home().join("omp-topology");
+    let state_before = file_snapshot(&state_root);
+    let config_path = default_agent_dir.join("config.yml");
+    let config_before = fs::read(&config_path).expect("installed config is missing");
+    let manifest_before = fs::read(&manifest).expect("ownership manifest is missing");
+    let registry_before = fs::read(&registry).expect("registry is missing");
+
+    let source_b = local_named_topology_source(
+        &temp,
+        "source-b",
+        "digital-product-studio-plus",
+        "fixture_b: B\n",
+        &[("a.txt", b"topology B")],
+    );
+    let source_b = source_b.to_str().expect("source path is not UTF-8");
+    let refused = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            "digital-product-studio-plus",
+            "--source",
+            source_b,
+            "--alias",
+            "omp-dps-plus",
+        ],
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "install did not refuse the different topology:\n{}",
+        output_text(&refused)
+    );
+    let diagnostics = output_text(&refused);
+    let missing_guidance = [
+        (
+            "existing target path",
+            diagnostics.contains(&default_agent_dir.display().to_string()),
+        ),
+        (
+            "existing and requested topology names",
+            diagnostics.contains(TOPOLOGY) && diagnostics.contains("digital-product-studio-plus"),
+        ),
+        (
+            "separate-profile hint",
+            diagnostics.contains("--profile digital-product-studio-plus"),
+        ),
+        (
+            "exact existing-alias update command",
+            diagnostics.contains("omp-topology update --alias omp-dps"),
+        ),
+        (
+            "update keeps the existing topology",
+            diagnostics.contains("keeps 'digital-product-studio'"),
+        ),
+        (
+            "update does not install the requested topology",
+            diagnostics.contains("does not install 'digital-product-studio-plus'"),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(guidance, present)| (!present).then_some(guidance))
+    .collect::<Vec<_>>();
+    let diagnostics_lower = diagnostics.to_lowercase();
+    for incorrect_claim in [
+        "to point the existing install at the requested topology",
+        "to switch the existing install to the requested topology",
+    ] {
+        assert!(
+            !diagnostics_lower.contains(incorrect_claim),
+            "recovery guidance falsely claims update changes the installed topology:\n{diagnostics}"
+        );
+    }
+
+    assert_eq!(file_snapshot(&default_agent_dir), target_before);
+    assert_eq!(file_snapshot(&state_root), state_before);
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_before);
+    assert_eq!(fs::read(&registry).unwrap(), registry_before);
+    assert!(
+        missing_guidance.is_empty(),
+        "refusal omitted approved guidance {missing_guidance:?}:\n{diagnostics}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_guidance_symlinked_skills_dir_refusal_has_no_cross_topology_guidance() {
+    let temp = TestDir::new();
+    let default_agent_dir = temp.0.join("default-agent");
+    let profile_agent_dir = temp.0.join("unused-profile-agent");
+    let profile_name = "digital-product-studio-plus";
+    let owner_source = local_named_topology_source(
+        &temp,
+        "owner-source",
+        TOPOLOGY,
+        "fixture_owner: owner\n",
+        &[("owner.txt", b"existing topology")],
+    );
+    let owner_source = owner_source
+        .to_str()
+        .expect("owner source path is not UTF-8");
+    let installed = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            TOPOLOGY,
+            "--source",
+            owner_source,
+            "--alias",
+            "omp-owner",
+        ],
+    );
+    assert_success(&installed);
+
+    let requested_source = local_named_topology_source(
+        &temp,
+        "requested-source",
+        "digital-product-studio-plus",
+        "fixture_requested: requested\n",
+        &[("requested.txt", b"requested topology")],
+    );
+    let requested_source = requested_source
+        .to_str()
+        .expect("requested source path is not UTF-8");
+    let outside_skills = temp.0.join("outside-skills");
+    fs::create_dir(&outside_skills).expect("failed to create external skills directory");
+    let skills_link = temp.0.join("skills-link");
+    symlink(&outside_skills, &skills_link).expect("failed to create skills-root symlink");
+
+    let target_before = file_snapshot(&default_agent_dir);
+    let state_root = temp.state_home().join("omp-topology");
+    let state_before = file_snapshot(&state_root);
+    let refused = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            "digital-product-studio-plus",
+            "--source",
+            requested_source,
+            "--alias",
+            "omp-requested",
+            "--skills-dir",
+            skills_link.to_str().expect("skills path is not UTF-8"),
+        ],
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "install did not refuse the symlinked skills directory:\n{}",
+        output_text(&refused)
+    );
+    let diagnostics = output_text(&refused);
+    assert!(
+        diagnostics.to_lowercase().contains("symlink"),
+        "install did not report the symlinked skills directory:\n{diagnostics}"
+    );
+    assert!(
+        !diagnostics.contains("guidance:"),
+        "unrelated skills-directory refusal received cross-topology guidance:\n{diagnostics}"
+    );
+    assert!(
+        !diagnostics.contains("omp-topology update --alias"),
+        "unrelated skills-directory refusal received an update command:\n{diagnostics}"
+    );
+    assert_eq!(file_snapshot(&default_agent_dir), target_before);
+    assert_eq!(file_snapshot(&state_root), state_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_guidance_multi_owner_collision_names_file_owner_alias() {
+    let temp = TestDir::new();
+    let default_agent_dir = temp.0.join("default-agent");
+    let profile_agent_dir = temp.0.join("unused-profile-agent");
+    let profile_name = "digital-product-studio-plus";
+    let first_source = local_named_topology_source(
+        &temp,
+        "first-source",
+        "alpha-topology",
+        "fixture_alpha: alpha\n",
+        &[("alpha.txt", b"alpha topology")],
+    );
+    let first_source = first_source
+        .to_str()
+        .expect("first source path is not UTF-8");
+    let first_install = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            "alpha-topology",
+            "--source",
+            first_source,
+            "--alias",
+            "omp-alpha",
+        ],
+    );
+    assert_success(&first_install);
+
+    let file_owner_source = local_named_topology_source(
+        &temp,
+        "file-owner-source",
+        "beta-topology",
+        "fixture_beta: beta\n",
+        &[("owned-collision.txt", b"beta topology")],
+    );
+    let file_owner_source = file_owner_source
+        .to_str()
+        .expect("file-owner source path is not UTF-8");
+    let file_owner_install = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            "beta-topology",
+            "--source",
+            file_owner_source,
+            "--alias",
+            "omp-zeta",
+        ],
+    );
+    assert_success(&file_owner_install);
+
+    let third_source = local_named_topology_source(
+        &temp,
+        "third-source",
+        "gamma-topology",
+        "fixture_gamma: gamma\n",
+        &[("owned-collision.txt", b"gamma topology")],
+    );
+    let third_source = third_source
+        .to_str()
+        .expect("third source path is not UTF-8");
+    let target_before = file_snapshot(&default_agent_dir);
+    let state_root = temp.state_home().join("omp-topology");
+    let state_before = file_snapshot(&state_root);
+    let refused = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            "gamma-topology",
+            "--source",
+            third_source,
+            "--alias",
+            "omp-gamma",
+        ],
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "install did not refuse the colliding file:\n{}",
+        output_text(&refused)
+    );
+    let diagnostics = output_text(&refused);
+    assert!(
+        diagnostics.contains("owned-collision.txt"),
+        "refusal did not identify the colliding file:\n{diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("omp-topology update --alias omp-zeta"),
+        "guidance did not name the alias that owns the colliding file:\n{diagnostics}"
+    );
+    assert!(
+        !diagnostics.contains("omp-topology update --alias omp-alpha"),
+        "guidance incorrectly named the lexicographically first, non-owning alias:\n{diagnostics}"
+    );
+    assert_eq!(file_snapshot(&default_agent_dir), target_before);
+    assert_eq!(file_snapshot(&state_root), state_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_guidance_disjoint_topologies_share_target_under_independent_aliases() {
+    let temp = TestDir::new();
+    let default_agent_dir = temp.0.join("default-agent");
+    let profile_agent_dir = temp.0.join("unused-profile-agent");
+    let profile_name = "digital-product-studio-plus";
+    let source_a = local_named_topology_source(
+        &temp,
+        "source-a",
+        TOPOLOGY,
+        "fixture_a: A\n",
+        &[("a.txt", b"topology A")],
+    );
+    let source_a = source_a.to_str().expect("source path is not UTF-8");
+    let installed_a = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            TOPOLOGY,
+            "--source",
+            source_a,
+            "--alias",
+            "omp-dps",
+        ],
+    );
+    assert_success(&installed_a);
+
+    let source_b = local_named_topology_source(
+        &temp,
+        "source-b",
+        "digital-product-studio-plus",
+        "fixture_b: B\n",
+        &[("b.txt", b"topology B")],
+    );
+    let source_b = source_b.to_str().expect("source path is not UTF-8");
+    let installed_b = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            "digital-product-studio-plus",
+            "--source",
+            source_b,
+            "--alias",
+            "omp-dps-plus",
+        ],
+    );
+    assert_success(&installed_b);
+    assert_eq!(
+        fs::read(default_agent_dir.join("a.txt")).unwrap(),
+        b"topology A"
+    );
+    assert_eq!(
+        fs::read(default_agent_dir.join("b.txt")).unwrap(),
+        b"topology B"
+    );
+
+    let registry = temp.state_home().join("omp-topology/registry.json");
+    let registry_value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry).expect("registry is missing"))
+            .expect("registry is not valid JSON");
+    let target = fs::canonicalize(&default_agent_dir)
+        .expect("default target is missing")
+        .display()
+        .to_string();
+    for (alias, topology) in [
+        ("omp-dps", TOPOLOGY),
+        ("omp-dps-plus", "digital-product-studio-plus"),
+    ] {
+        assert_eq!(registry_value["aliases"][alias]["agent_dir"], target);
+        assert_eq!(registry_value["aliases"][alias]["topology"], topology);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_guidance_named_profile_dry_run_preserves_default_state() {
+    let temp = TestDir::new();
+    let default_agent_dir = temp.0.join("default-agent");
+    let profile_name = "digital-product-studio-plus";
+    let profile_root = temp.0.join("home/.omp/profiles").join(profile_name);
+    let profile_agent_dir = profile_root.join("agent");
+    let source_a = local_named_topology_source(
+        &temp,
+        "source-a",
+        TOPOLOGY,
+        "fixture_a: A\n",
+        &[("a.txt", b"topology A")],
+    );
+    let source_a = source_a.to_str().expect("source path is not UTF-8");
+    let installed = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            TOPOLOGY,
+            "--source",
+            source_a,
+            "--alias",
+            "omp-dps",
+        ],
+    );
+    assert_success(&installed);
+
+    let manifest = manifest_path(&temp, &default_agent_dir);
+    let registry = temp.state_home().join("omp-topology/registry.json");
+    let state_root = temp.state_home().join("omp-topology");
+    let target_before = file_snapshot(&default_agent_dir);
+    let state_before = file_snapshot(&state_root);
+    let manifest_before = fs::read(&manifest).expect("ownership manifest is missing");
+    let registry_before = fs::read(&registry).expect("registry is missing");
+
+    let source_b = local_named_topology_source(
+        &temp,
+        "source-b",
+        "digital-product-studio-plus",
+        "fixture_b: B\n",
+        &[("b.txt", b"topology B")],
+    );
+    let source_b = source_b.to_str().expect("source path is not UTF-8");
+    let planned = run_cli_with_fake_omp(
+        &temp,
+        &default_agent_dir,
+        profile_name,
+        &profile_agent_dir,
+        &[
+            "install",
+            "--topology",
+            "digital-product-studio-plus",
+            "--source",
+            source_b,
+            "--profile",
+            profile_name,
+            "--alias",
+            "omp-dps-plus",
+            "--dry-run",
+        ],
+    );
+    assert_success(&planned);
+    let plan = String::from_utf8_lossy(&planned.stdout);
+    assert!(
+        plan.contains(&profile_agent_dir.display().to_string()),
+        "dry-run plan did not target the named profile agent directory:\n{plan}"
+    );
+    assert!(
+        !plan.contains(&default_agent_dir.display().to_string()),
+        "dry-run plan used the existing default target:\n{plan}"
+    );
+    assert!(
+        !profile_root.exists() && !profile_agent_dir.exists(),
+        "dry-run created profile or agent directories"
+    );
+    assert_eq!(file_snapshot(&default_agent_dir), target_before);
+    assert_eq!(file_snapshot(&state_root), state_before);
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_before);
+    assert_eq!(fs::read(&registry).unwrap(), registry_before);
+    let registry_value: serde_json::Value =
+        serde_json::from_slice(&registry_before).expect("registry is not valid JSON");
+    assert!(
+        registry_value["aliases"].get("omp-dps-plus").is_none(),
+        "dry-run registered the new alias"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_guidance_status_distinguishes_manifest_from_registry_alias() {
+    let temp = TestDir::new();
+    let profile_name = "manifest-only";
+    let profile_agent_dir = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile_name)
+        .join("agent");
+    let source = local_named_topology_source(
+        &temp,
+        "source",
+        TOPOLOGY,
+        "fixture: true\n",
+        &[("payload.txt", b"installed")],
+    );
+    let installed = install_from_source(&temp, &profile_agent_dir, &source, &[]);
+    assert_success(&installed);
+
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry_path).expect("registry is missing"))
+            .expect("registry is not valid JSON");
+    let aliases = registry["aliases"]
+        .as_object_mut()
+        .expect("registry aliases are not an object");
+    assert!(
+        aliases.remove("agent").is_some(),
+        "test setup did not register the expected default alias"
+    );
+    fs::write(
+        &registry_path,
+        serde_json::to_vec(&registry).expect("failed to serialize registry fixture"),
+    )
+    .expect("failed to remove the test alias registration");
+    assert!(
+        manifest_path(&temp, &profile_agent_dir).is_file(),
+        "test setup lost the existing topology manifest"
+    );
+    assert!(
+        registry["aliases"]
+            .as_object()
+            .is_some_and(|aliases| aliases.is_empty()),
+        "test setup unexpectedly retained an alias: {registry}"
+    );
+
+    let output = run_cli_with_fake_omp(
+        &temp,
+        &temp.0.join("unused-default-agent"),
+        profile_name,
+        &profile_agent_dir,
+        &["status", "--profile", profile_name],
+    );
+    assert_success(&output);
+    let status = output_text(&output);
+    assert!(
+        status.contains("topology manifest: digital-product-studio"),
+        "status did not identify the topology manifest:\n{status}"
+    );
+    assert!(
+        status.contains("registry alias: none"),
+        "status did not distinguish an absent registry alias:\n{status}"
+    );
+    assert!(
+        status.contains(&profile_agent_dir.display().to_string()),
+        "status omitted the resolved target path:\n{status}"
+    );
+    assert!(
+        status.contains("profile: manifest-only"),
+        "status omitted the selected profile:\n{status}"
     );
 }
 

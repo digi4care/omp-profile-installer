@@ -432,6 +432,25 @@ in a Docker toolchain) live in [scripts/rust-gates.sh](scripts/rust-gates.sh);
 CI runs them on pull requests that change Rust inputs
 ([.github/workflows/rust-gates.yml](.github/workflows/rust-gates.yml)).
 
+**Persistent dev container (Docker Compose).** For local Rust work, a
+long-lived Compose service keeps a pinned Rust 1.100.0 container running with
+warm Cargo caches (named volumes), so repeated gate runs skip toolchain setup
+and recompilation:
+
+```sh
+docker compose up -d --build                       # build and start the container
+docker compose exec rust ./scripts/rust-gates.sh   # run the gates inside it
+docker compose down                                # stop; caches are kept
+```
+
+The repository is bind-mounted at `/workspace`; `CARGO_HOME=/cache/cargo` and
+`CARGO_TARGET_DIR=/cache/target` live on the named volumes
+`omp-topology-cargo-home` and `omp-topology-cargo-target`, and
+`OMP_TOPOLOGY_RUST_CONTAINER=1` makes `scripts/rust-gates.sh` run its
+in-container path instead of starting nested Docker. `docker compose down`
+preserves the caches — only `docker compose down -v` deletes them. This warms
+local Docker runs only; GitHub-hosted CI caches separately and is unchanged.
+
 ---
 
 ## 🧱 Project Structure
