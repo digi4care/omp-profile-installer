@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [0.2.6] - 2026-11-25
+
+### Added
+
+- Refuse new registry aliases that collide with existing executable files on
+  `PATH` before named-profile resolution, target creation, or registration,
+  including dry-run; same-alias updates retain their upsert behavior.
+- Add an installer guide covering profiles, topologies, aliases, executable
+  names, version-pinned installs, and troubleshooting.
+
 ## [0.2.5] - 2026-11-25
 
 ### Added
