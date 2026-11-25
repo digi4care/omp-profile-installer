@@ -364,7 +364,14 @@ impl RootFd {
     /// The permission bits (`& 0o7777`) of `rel`, or `None` when absent.
     pub fn file_mode(&self, rel: &str) -> io::Result<Option<u32>> {
         match self.walk_parent(rel, None) {
-            Ok((dir, name)) => Ok(lstat_at(&dir.fd, &name)?.map(|stat| stat.st_mode & 0o7777)),
+            Ok((dir, name)) => {
+                #[cfg_attr(
+                    not(any(target_os = "macos", target_os = "ios")),
+                    allow(clippy::useless_conversion)
+                )]
+                let mode = lstat_at(&dir.fd, &name)?.map(|stat| u32::from(stat.st_mode & 0o7777));
+                Ok(mode)
+            }
             Err(SubdirError::NotFound) => Ok(None),
             Err(err) => Err(err.into()),
         }
