@@ -68,6 +68,8 @@ omp-topology install -t digital-product-studio-plus \
 ## Source of truth
 
 - [Topology manifest](topology.yml) — name, profile, `installable: true`.
+- [Changelog](CHANGELOG.md) — per-topology version history; one dated entry
+  per `version` bump.
 - [Orchestration rules](agent/RULES.md) — routing, proportional planning
   tiers, main-session responsibilities, worker-brief constraints.
 - [Agent config](agent/config.yml) — task concurrency/recursion limits,

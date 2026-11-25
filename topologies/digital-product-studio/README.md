@@ -1,6 +1,6 @@
 # digital-product-studio
 
-Six-domain digital product studio topology for OMP (v2.0.0, per `topology.yml`). The main session routes work across six domain leads — product-strategy, engineering, QA, design, content, marketing — each backed by a lazy charter skill, with subagent spawning bounded by `task.maxRecursionDepth: 2`.
+Six-domain digital product studio topology for OMP (v2.0.1, per `topology.yml`). The main session routes work across six domain leads — product-strategy, engineering, QA, design, content, marketing — each backed by a lazy charter skill, with subagent spawning bounded by `task.maxRecursionDepth: 2`.
 
 ## When to choose it
 
@@ -16,6 +16,7 @@ requirements-to-delivery planning with a read-only acceptance-scope advisor.
 | File | Role |
 |------|------|
 | [`topology.yml`](topology.yml) | Topology metadata: name, version, description, install profile |
+| [`CHANGELOG.md`](CHANGELOG.md) | Per-topology version history; one dated entry per `version` bump |
 | [`agent/config.yml`](agent/config.yml) | Agent overlay: eager spawning, auto-parallelism, concurrency cap 4, recursion depth 2, model roles |
 | [`agent/RULES.md`](agent/RULES.md) | Top-level orchestration policy: routing table, brief approval, final review, scope guard, subagent constraints, QA verification rules |
 | [`agent/agents/`](agent/agents/) | Domain-lead agent definitions (one file per domain) |

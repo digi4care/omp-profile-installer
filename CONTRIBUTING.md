@@ -26,7 +26,9 @@ installer-compatible and understandable to humans and agents:
 3. **Write the manifest.** Populate `version` and `description` (the
    installer renders them; fallbacks exist but produce poor listings), set
    `installable: true`, and set `profile` only if the topology needs a
-   non-default profile suggestion.
+   non-default profile suggestion. Start `version` at `1.0.0` and create the
+   topology's own `topologies/<name>/CHANGELOG.md` (see "Versioning topology
+   changes" below).
 4. **Structure the payload.**
    - `topologies/<name>/agent/` is the only directory the installer copies.
      Nested files are copied recursively; `agent/config.yml` is not copied
@@ -65,6 +67,36 @@ installer-compatible and understandable to humans and agents:
 
    - Confirm `cargo run -- list` shows the topology with the expected
      name, version, and description.
+
+## Versioning topology changes
+
+Every topology is independently versioned, and the version is load-bearing:
+`update` and the CLI's exact `--version` assertion compare against the
+`version` declared in the selected source's `topology.yml`. (`status` never
+compares versions; it reports source commit/digest freshness.)
+
+- **Every change bumps the version.** Any PR that changes a topology's
+  payload or metadata — `agent/` files, `topology.yml` fields, shipped docs —
+  must bump that topology's `version` in the same PR. There is no "too small
+  to bump" topology change.
+- **Bump semantics** (full contract in the repository README's "Topology
+  Versioning and Updates" section): `major` for changes to the topology's
+  contract with its users (routing model, role boundaries, approval gates,
+  removed or renamed agents/skills/config keys); `minor` for additive,
+  backward-compatible changes; `patch` for fixes and clarifications that
+  leave the contract intact.
+- **One changelog per topology.** Each topology keeps its own
+  `topologies/<name>/CHANGELOG.md` in Keep-a-Changelog style, with one dated
+  section per version describing what actually changed. Do not invent
+  features or credit fixes the diff does not contain.
+- **Topology versions are not CLI releases.** The `omp-topology` crate
+  version and its signed releases move independently of every topology
+  version; never couple a topology bump to a CLI release.
+- **Verify the update path when it changes.** If a PR changes versioning,
+  update, or source-selection behavior, verify `update` against an alias
+  that already exists in a real registry — `update --alias <existing>`
+  does not create installs. Run `--dry-run` first, inspect the plan, then
+  run the real update, and report both under the PR's Verification section.
 
 ## Implementation and verification
 
@@ -118,6 +150,12 @@ Write the PR description for a reviewer who has not followed the discussion. Inc
 4. **Limitations / follow-up** — known gaps, unverified criteria, dependencies on another PR, or pending decisions.
 
 Keep the description aligned with the actual PR diff. For stacked PRs, link the prerequisite and state the merge order. Do not include unrelated branch history as if it were part of the change.
+
+For PRs that change a topology's payload or metadata, the description must also confirm each of the following:
+
+- **Version bumped.** `topologies/<name>/topology.yml` `version` was bumped per SemVer (`major`/`minor`/`patch`) for every topology whose files changed.
+- **Changelog entry added.** `topologies/<name>/CHANGELOG.md` has a dated section for the new version describing the actual change — no invented features.
+- **Update verified.** If the PR touches versioning, update, or source-selection behavior, `update --alias <existing-alias>` was run against a real existing alias — `--dry-run` first, then the real update — with the observed results reported under Verification.
 
 ## Review and merging
 

@@ -78,6 +78,7 @@ omp-topology install -t teddy \
 ## Files
 
 - [`topology.yml`](topology.yml) — topology metadata and description
+- [`CHANGELOG.md`](CHANGELOG.md) — per-topology version history; one dated entry per `version` bump
 - [`agent/RULES.md`](agent/RULES.md) — top-level orchestration policy
 - [`agent/config.yml`](agent/config.yml) — task and model-role overlay
 - [`agent/agents/`](agent/agents/) — domain-lead agent definitions

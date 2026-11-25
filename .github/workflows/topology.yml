@@ -103,8 +103,8 @@ jobs:
               # Mirror src/value.rs display_metadata: nil -> "", booleans ->
               # True/False, integral floats -> one decimal, sequences joined
               # with ", ", maps -> "". Non-integral floats must render like
-              # Rust's f64 Display: shortest round-trip digits in plain
-              # decimal, never scientific notation. Ruby's Float#to_s
+              # Rust f64 Display: shortest round-trip digits in plain
+              # decimal, never scientific notation. Ruby Float#to_s
               # switches to exponential form (0.00001 -> 1.0e-05), so
               # re-expand it to the plain decimal Rust prints.
               plain_float = lambda do |value|

@@ -14,6 +14,11 @@ clap = { version = "4.6", features = ["derive"] }
 yaml-edit = { version = "0.3.6", default-features = false }
 serde_json = "1"
 sha2 = "0.10"
+# Real SemVer parsing/ordering for install/update version validation
+# (declared topology versions, exact requested --version assertions, and
+# the installed-version downgrade rejection); never an ad-hoc numeric
+# split.
+semver = "1"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 percent-encoding = "2"
 # Descriptor-anchored filesystem operations (openat family, O_NOFOLLOW):
