@@ -166,6 +166,421 @@ fn install_from_source(
     args.extend_from_slice(extra_args);
     run_cli(temp, agent_dir, &args)
 }
+#[cfg(unix)]
+fn run_install_from_source_with_path(
+    temp: &TestDir,
+    agent_dir: &Path,
+    source: &Path,
+    alias: &str,
+    dry_run: bool,
+    path: &Path,
+) -> Output {
+    let source = source.to_str().expect("local source path is not UTF-8");
+    let mut command = cli_command(temp, Path::new(env!("CARGO_MANIFEST_DIR")));
+    command
+        .args([
+            "install", "-t", TOPOLOGY, "--source", source, "--alias", alias,
+        ])
+        .arg("--agent-dir")
+        .arg(agent_dir)
+        .env("PATH", path);
+    if dry_run {
+        command.arg("--dry-run");
+    }
+    command.output().expect("failed to execute omp-topology")
+}
+
+#[cfg(unix)]
+fn create_path_dir(temp: &TestDir) -> PathBuf {
+    let path = temp.0.join("path");
+    fs::create_dir(&path).expect("failed to create isolated PATH directory");
+    path
+}
+
+#[cfg(unix)]
+fn add_path_executable(path_dir: &Path, name: &str) -> PathBuf {
+    let executable = path_dir.join(name);
+    fs::write(&executable, b"#!/bin/sh\nexit 0\n")
+        .expect("failed to create PATH executable fixture");
+    let mut permissions = fs::metadata(&executable)
+        .expect("failed to inspect PATH executable fixture")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions)
+        .expect("failed to mark PATH executable fixture executable");
+    executable
+}
+
+#[cfg(unix)]
+fn assert_choose_another_alias_hint(stderr: &str) {
+    let lower = stderr.to_ascii_lowercase();
+    assert!(
+        lower.contains("--alias")
+            && (lower.contains("choose another")
+                || lower.contains("choose a different")
+                || lower.contains("use another")
+                || lower.contains("use a different")),
+        "error did not direct the user to choose another --alias:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_alias_preflight_refuses_path_executable_before_mutation() {
+    let temp = TestDir::new();
+    let path_dir = create_path_dir(&temp);
+    let executable = add_path_executable(&path_dir, "teddy");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+    let agent_dir = temp.0.join("agent");
+    assert!(!agent_dir.exists(), "test target must begin absent");
+    assert!(
+        !temp.state_home().exists(),
+        "test state home must begin absent"
+    );
+
+    let output =
+        run_install_from_source_with_path(&temp, &agent_dir, &source, "teddy", false, &path_dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "install unexpectedly succeeded despite PATH executable collision; target_exists={}, state_home_exists={}, registry_exists={}\nstdout:\n{}\nstderr:\n{}",
+        agent_dir.exists(),
+        temp.state_home().exists(),
+        temp.state_home()
+            .join("omp-topology/registry.json")
+            .exists(),
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+    assert!(
+        stderr.contains("teddy"),
+        "error did not name the colliding alias:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(executable.to_str().expect("executable path is not UTF-8")),
+        "error did not include the full colliding executable path {}:\n{stderr}",
+        executable.display()
+    );
+    assert_choose_another_alias_hint(&stderr);
+    assert!(
+        !agent_dir.exists(),
+        "collision refusal created the install target"
+    );
+    assert!(
+        !temp.state_home().exists(),
+        "collision refusal created installer state"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_alias_preflight_refuses_path_executable_during_dry_run() {
+    let temp = TestDir::new();
+    let path_dir = create_path_dir(&temp);
+    let executable = add_path_executable(&path_dir, "teddy");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+    let agent_dir = temp.0.join("agent");
+
+    let output =
+        run_install_from_source_with_path(&temp, &agent_dir, &source, "teddy", true, &path_dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "dry-run unexpectedly succeeded despite PATH executable collision; target_exists={}, state_home_exists={}, registry_exists={}\nstdout:\n{}\nstderr:\n{}",
+        agent_dir.exists(),
+        temp.state_home().exists(),
+        temp.state_home()
+            .join("omp-topology/registry.json")
+            .exists(),
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+    assert!(stderr.contains("teddy"), "error omitted alias:\n{stderr}");
+    assert!(
+        stderr.contains(executable.to_str().expect("executable path is not UTF-8")),
+        "error omitted full colliding executable path {}:\n{stderr}",
+        executable.display()
+    );
+    assert_choose_another_alias_hint(&stderr);
+    assert!(
+        !agent_dir.exists(),
+        "dry-run collision refusal created the install target"
+    );
+    assert!(
+        !temp.state_home().exists(),
+        "dry-run collision refusal created installer state"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_alias_preflight_allows_non_executable_path_file() {
+    let temp = TestDir::new();
+    let path_dir = create_path_dir(&temp);
+    let same_named_file = path_dir.join("teddy");
+    fs::write(&same_named_file, b"not executable").expect("failed to create non-executable file");
+    let mut permissions = fs::metadata(&same_named_file)
+        .expect("failed to inspect non-executable file")
+        .permissions();
+    permissions.set_mode(0o644);
+    fs::set_permissions(&same_named_file, permissions)
+        .expect("failed to mark PATH fixture non-executable");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+    let agent_dir = temp.0.join("agent");
+
+    let output =
+        run_install_from_source_with_path(&temp, &agent_dir, &source, "teddy", false, &path_dir);
+    assert_success(&output);
+    assert_eq!(
+        fs::read(agent_dir.join("payload.txt")).expect("install did not write its payload"),
+        b"payload"
+    );
+    let registry: serde_json::Value = serde_json::from_slice(
+        &fs::read(temp.state_home().join("omp-topology/registry.json"))
+            .expect("successful install did not register its alias"),
+    )
+    .expect("registry is not valid JSON");
+    assert!(
+        registry["aliases"]["teddy"].is_object(),
+        "successful install did not register alias 'teddy'"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_alias_preflight_allows_distinct_alias_when_other_executable_exists() {
+    let temp = TestDir::new();
+    let path_dir = create_path_dir(&temp);
+    add_path_executable(&path_dir, "teddy");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+    let agent_dir = temp.0.join("agent");
+
+    let output = run_install_from_source_with_path(
+        &temp,
+        &agent_dir,
+        &source,
+        "omp-teddy",
+        false,
+        &path_dir,
+    );
+    assert_success(&output);
+    assert_eq!(
+        fs::read(agent_dir.join("payload.txt")).expect("install did not write its payload"),
+        b"payload"
+    );
+    let registry: serde_json::Value = serde_json::from_slice(
+        &fs::read(temp.state_home().join("omp-topology/registry.json"))
+            .expect("successful install did not register its alias"),
+    )
+    .expect("registry is not valid JSON");
+    assert!(
+        registry["aliases"]["omp-teddy"].is_object(),
+        "successful install did not register distinct alias 'omp-teddy'"
+    );
+    assert!(
+        registry["aliases"]["teddy"].is_null(),
+        "install registered the unrelated executable name instead of the requested alias"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_alias_preflight_ignores_executable_for_same_registered_alias() {
+    let temp = TestDir::new();
+    let path_dir = create_path_dir(&temp);
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+    let agent_dir = temp.0.join("agent");
+
+    let first =
+        run_install_from_source_with_path(&temp, &agent_dir, &source, "teddy", false, &path_dir);
+    assert_success(&first);
+    let target_before = file_snapshot(&agent_dir);
+    let state_before = file_snapshot(&temp.state_home());
+    add_path_executable(&path_dir, "teddy");
+
+    let second =
+        run_install_from_source_with_path(&temp, &agent_dir, &source, "teddy", false, &path_dir);
+    assert_success(&second);
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        target_before,
+        "reinstall of the existing alias changed target files"
+    );
+    assert_eq!(
+        file_snapshot(&temp.state_home()),
+        state_before,
+        "reinstall of the existing alias changed installer state"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_alias_preflight_rejects_registered_alias_without_mutation() {
+    let temp = TestDir::new();
+    let path_dir = create_path_dir(&temp);
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+    let existing_agent_dir = temp.0.join("existing-agent");
+    let requested_agent_dir = temp.0.join("requested-agent");
+    let alias = "registered-teddy";
+
+    let initial = run_install_from_source_with_path(
+        &temp,
+        &existing_agent_dir,
+        &source,
+        alias,
+        false,
+        &path_dir,
+    );
+    assert_success(&initial);
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let registry_before = fs::read(&registry_path).expect("initial install omitted registry");
+    let state_before = file_snapshot(&temp.state_home());
+    let target_before = file_snapshot(&existing_agent_dir);
+
+    let output = run_install_from_source_with_path(
+        &temp,
+        &requested_agent_dir,
+        &source,
+        alias,
+        false,
+        &path_dir,
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "install reused an alias already mapped to another target\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+    assert!(
+        stderr.contains(alias) && stderr.to_ascii_lowercase().contains("already registered"),
+        "registry collision error did not identify the registered alias:\n{stderr}"
+    );
+    assert_eq!(
+        fs::read(&registry_path).expect("registry disappeared after collision refusal"),
+        registry_before,
+        "registry collision refusal changed the registry"
+    );
+    assert_eq!(
+        file_snapshot(&temp.state_home()),
+        state_before,
+        "registry collision refusal changed installer state"
+    );
+    assert_eq!(
+        file_snapshot(&existing_agent_dir),
+        target_before,
+        "registry collision refusal changed the existing target"
+    );
+    assert!(
+        !requested_agent_dir.exists(),
+        "registry collision refusal created the requested target"
+    );
+    let lower = stderr.to_ascii_lowercase();
+    assert!(
+        (lower.contains("update") && lower.contains("existing alias"))
+            || lower.contains("choose another")
+            || lower.contains("choose a different")
+            || lower.contains("use another")
+            || lower.contains("use a different"),
+        "registry collision error did not direct the user to update the existing alias or choose another:\n{stderr}"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn installer_alias_preflight_refuses_before_named_profile_resolution() {
+    let temp = TestDir::new();
+    let home = temp.0.join("home");
+    let profile = "new-profile";
+    let omp_root = home.join(".omp");
+    let profiles_root = omp_root.join("profiles");
+    let agent_dir = profiles_root.join(profile).join("agent");
+    let path_dir = create_path_dir(&temp);
+    let executable = add_path_executable(&path_dir, "teddy");
+    let fake_omp = path_dir.join("omp");
+    let omp_log = temp.0.join("omp-invocations.log");
+    fs::write(
+        &fake_omp,
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$OMP_TEST_OMP_LOG\"\n\
+         if [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"config\" ] && [ \"$4\" = \"path\" ]; then\n\
+         \tmkdir -p \"$OMP_TEST_AGENT_DIR\"\n\
+         \tprintf '%s\\n' \"$OMP_TEST_AGENT_DIR\"\n\
+         \texit 0\n\
+         fi\n\
+         exit 64\n",
+    )
+    .expect("failed to write fake omp");
+    let mut permissions = fs::metadata(&fake_omp)
+        .expect("failed to inspect fake omp")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_omp, permissions).expect("failed to make fake omp executable");
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(path_dir).chain(std::env::split_paths(&inherited_path)),
+    )
+    .expect("failed to build isolated PATH");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+    let source = source.to_str().expect("local source path is not UTF-8");
+
+    let output = cli_command(&temp, Path::new(env!("CARGO_MANIFEST_DIR")))
+        .args([
+            "install",
+            "-t",
+            TOPOLOGY,
+            "--source",
+            source,
+            "--profile",
+            profile,
+            "--alias",
+            "teddy",
+        ])
+        .env("PATH", path)
+        .env("OMP_TEST_PROFILE", profile)
+        .env("OMP_TEST_AGENT_DIR", &agent_dir)
+        .env("OMP_TEST_OMP_LOG", &omp_log)
+        .output()
+        .expect("failed to execute installer with named profile");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let omp_invoked = omp_log.exists();
+    let omp_log_contents = fs::read_to_string(&omp_log).unwrap_or_default();
+    let state_home = temp.state_home();
+    let registry_path = state_home.join("omp-topology/registry.json");
+    assert!(
+        !output.status.success(),
+        "install unexpectedly proceeded despite PATH executable collision; omp_invoked={omp_invoked}, omp_log={omp_log_contents:?}, profile_root_exists={}, target_exists={}, state_home_exists={}, registry_exists={}\nstdout:\n{}\nstderr:\n{}",
+        profiles_root.exists(),
+        agent_dir.exists(),
+        state_home.exists(),
+        registry_path.exists(),
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+    assert!(
+        stderr.contains("teddy"),
+        "collision error did not name alias 'teddy':\n{stderr}"
+    );
+    assert!(
+        stderr.contains(executable.to_str().expect("executable path is not UTF-8")),
+        "collision error did not include full executable path {}:\n{stderr}",
+        executable.display()
+    );
+    assert_choose_another_alias_hint(&stderr);
+    let omp_root_exists = omp_root.exists();
+    let profiles_root_exists = profiles_root.exists();
+    let target_exists = agent_dir.exists();
+    let state_home_exists = state_home.exists();
+    let registry_exists = registry_path.exists();
+    assert!(
+        !omp_invoked
+            && !omp_root_exists
+            && !profiles_root_exists
+            && !target_exists
+            && !state_home_exists
+            && !registry_exists,
+        "collision preflight had side effects: omp_invoked={omp_invoked}, omp_log={omp_log_contents:?}, omp_root_exists={omp_root_exists}, profiles_root_exists={profiles_root_exists}, target_exists={target_exists}, state_home_exists={state_home_exists}, registry_exists={registry_exists}"
+    );
+}
 
 #[test]
 fn installer_regression_dry_run_file_update_tracks_manifest() {

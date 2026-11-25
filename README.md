@@ -43,6 +43,7 @@ with no server to run and no sudo required.
 <td valign="top" width="33%">
 
 **Operations**
+- [📖 How the Installer Works](docs/installer.md)
 - [⚙️ Installing and Updating the CLI](#️-installing-and-updating-the-cli)
 - [📦 Topology Versioning and Updates](#-topology-versioning-and-updates)
 - [🧱 Project Structure](#-project-structure)
@@ -263,7 +264,9 @@ cargo run -- list
 cargo run -- install -t digital-product-studio --profile digital-product-studio --dry-run
 ```
 
-More guidance: [topologies/README.md](topologies/README.md) (payload layout and
+More guidance: [docs/installer.md](docs/installer.md) (how the installer
+works: aliases, profiles, preflight checks, and troubleshooting),
+[topologies/README.md](topologies/README.md) (payload layout and
 discovery), [CONTRIBUTING.md](CONTRIBUTING.md) (adding a topology, verification).
 
 ---
@@ -282,9 +285,14 @@ The day-to-day lifecycle is `list → install → status → update → remove`:
    through `omp --profile NAME config path` can create a missing profile as an
    OMP side effect; explicit `--agent-dir` and ambient `omp config path`
    resolution do not create a target directory.
-3. **Install.** The real run applies the overlay in one transaction and
-   registers the alias. Re-installing under the same alias and target is an
-   upsert; an alias pointing elsewhere is refused with an actionable error.
+3. **Install.** Creating a new alias first passes the alias name preflight:
+   the alias must not already be registered for another target, and no
+   executable file with the alias's name may exist on `PATH` (shell aliases
+   and functions are not detectable). The real run then applies the overlay
+   in one transaction and registers the alias. Re-installing under the same
+   alias and target is an intentional upsert; an alias pointing elsewhere is
+   refused with an actionable error. See
+   [docs/installer.md](docs/installer.md#alias-name-preflight).
    A second alias may target the same agent directory: each alias owns only
    what it installed, and any overlap with another alias's files or config
    keys is refused before anything is mutated.
