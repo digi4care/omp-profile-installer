@@ -82,6 +82,11 @@ pub struct InstallOptions<'a> {
     /// recovery markers so a sibling alias's rollback snapshot is never
     /// cleared.
     pub alias: Option<&'a str>,
+    /// Exact topology metadata version assertion: when given, the
+    /// resolved topology's declared `version` must equal this version
+    /// exactly (never a range, never compared against a recorded
+    /// version), checked before any target or registry mutation.
+    pub expected_version: Option<&'a semver::Version>,
 }
 
 /// Resolve the target agent directory (explicit override or `omp config path`).
@@ -507,6 +512,42 @@ pub fn preflight_target_links(
     Ok(())
 }
 
+/// Strict SemVer gate for a resolved topology's declared `version`,
+/// shared by `cmd_install`'s preflight (run after source resolution but
+/// before the registry lock, so a refused first-time install leaves the
+/// previously absent state root absent) and [`run`] (repeated under the
+/// lock, so a source edited in between still fails closed before any
+/// mutation). `declared` is the metadata `version` string read from
+/// `metadata_path`; an unparsable declaration fails closed instead of
+/// being recorded or compared ad hoc, and a requested expectation must
+/// match the declared version exactly (an assertion, never a range).
+pub fn validate_declared_version(
+    topology: &str,
+    metadata_path: &Path,
+    declared: &str,
+    expected_version: Option<&semver::Version>,
+) -> Result<semver::Version, CliError> {
+    let declared_version = semver::Version::parse(declared).map_err(|err| {
+        CliError::Topology(format!(
+            "topology '{topology}' declares version '{declared}' in {}, which \
+             is not valid SemVer ({err}); fix the topology's topology.yml \
+             before installing",
+            metadata_path.display(),
+        ))
+    })?;
+    if let Some(expected) = expected_version
+        && *expected != declared_version
+    {
+        return Err(CliError::Usage(format!(
+            "refusing to install: requested version {expected} but topology \
+             '{topology}' declares version {declared_version} in {}; pass the \
+             declared version or drop --version to accept it",
+            metadata_path.display(),
+        )));
+    }
+    Ok(declared_version)
+}
+
 pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError> {
     let topology_root = opts.topology_root;
     let state_anchor = opts.state_anchor;
@@ -526,6 +567,19 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     let meta = topology::topology_metadata(&topology_dir)?;
     let meta_name = topology::meta_name(&meta);
     let meta_version = topology::meta_version(&meta);
+    // SemVer gate, before any preflight/target/registry mutation so every
+    // refusal below leaves the target, the registry, and the state home
+    // untouched; `cmd_install` runs the same check via
+    // [`validate_declared_version`] before acquiring the registry lock,
+    // and it is repeated here under the lock to close source-mutation
+    // races. The manifest still records the original declared string.
+    let metadata_path = topology_dir.join("topology.yml");
+    validate_declared_version(
+        opts.topology,
+        &metadata_path,
+        &meta_version,
+        opts.expected_version,
+    )?;
     let topo_config_path = topology_dir.join("agent").join(yamlwork::CONFIG_NAME);
     if fsx::is_symlink(&topo_config_path) {
         return Err(CliError::Topology(format!(
@@ -3239,6 +3293,7 @@ mod tests {
             config_mode: ConfigMode::Replace,
             manifest_path: None,
             alias: None,
+            expected_version: None,
         };
         let mut output = Vec::new();
         let result = state::with_state_home_for_test(&state_home, || {

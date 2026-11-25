@@ -531,6 +531,19 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
     files.sort();
     files
 }
+fn file_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    files_under(root)
+        .into_iter()
+        .map(|path| {
+            (
+                path.strip_prefix(root)
+                    .expect("file escaped snapshot root")
+                    .to_path_buf(),
+                fs::read(path).expect("failed to read snapshot file"),
+            )
+        })
+        .collect()
+}
 
 fn state_snapshot_without_manifest(state_home: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let root = state_home.join("omp-topology");
@@ -931,7 +944,7 @@ fn list_and_install_resolve_topology_source_outside_the_checkout() {
     assert_success(&listing);
     let listing_text = String::from_utf8_lossy(&listing.stdout);
     assert!(
-        listing_text.contains("digital-product-studio 2.0.0"),
+        listing_text.contains("digital-product-studio 2.0.1"),
         "list did not use the source checkout topology:\n{listing_text}"
     );
     assert!(
@@ -1089,7 +1102,7 @@ fn install_dry_run_accepts_legacy_config_file_existed_boolean() {
     let ownership: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest).expect("ownership manifest is missing"))
             .expect("ownership manifest is not valid JSON");
-    assert_eq!(ownership["topology_version"], "2.0.0");
+    assert_eq!(ownership["topology_version"], "2.0.1");
     assert!(
         ownership["config"]["prior"].is_object() && ownership["config"]["installed"].is_object(),
         "fixture lacks valid current config ownership"
@@ -1103,7 +1116,7 @@ fn install_dry_run_accepts_legacy_config_file_existed_boolean() {
     let legacy_manifest = serde_json::json!({
         "version": 1,
         "topology": TOPOLOGY,
-        "topology_version": "2.0.0",
+        "topology_version": "2.0.1",
         "files": ownership["files"].clone(),
         "created_dirs": ownership["created_dirs"].clone(),
         "config": {
@@ -1959,6 +1972,743 @@ fn config_yaml_default_install_preserves_existing_config_and_publishes_candidate
         fs::read(agent_dir.join("config.yml.new")).expect("config candidate was not published"),
         topology_config.as_bytes(),
         "candidate does not contain the topology config"
+    );
+}
+#[test]
+fn update_with_version_refreshes_an_existing_recorded_alias() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"v1")]);
+    let alias = "semver-existing";
+
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    assert_success(&installed);
+
+    let payload = agent_dir.join("payload.txt");
+    assert_eq!(
+        fs::read(&payload).expect("initial payload is missing"),
+        b"v1"
+    );
+
+    let manifest_path = manifest_path(&temp, &agent_dir);
+    let initial_manifest_bytes = fs::read(&manifest_path).expect("initial manifest is missing");
+    let initial_manifest: serde_json::Value = serde_json::from_slice(&initial_manifest_bytes)
+        .expect("initial manifest is not valid JSON");
+    assert_eq!(initial_manifest["topology_version"], "1.0.0");
+
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let initial_registry_bytes = fs::read(&registry_path).expect("registry is missing");
+    let initial_registry: serde_json::Value =
+        serde_json::from_slice(&initial_registry_bytes).expect("registry is not valid JSON");
+    let initial_alias = &initial_registry["aliases"][alias];
+    assert!(
+        !initial_alias.is_null(),
+        "install did not register alias '{alias}'"
+    );
+    let initial_target = initial_alias["agent_dir"]
+        .as_str()
+        .expect("registry alias has no target")
+        .to_owned();
+    let initial_target_snapshot = file_snapshot(&agent_dir);
+    let topology_dir = source.join("topologies").join(TOPOLOGY);
+    fs::write(
+        topology_dir.join("topology.yml"),
+        format!(
+            "name: {TOPOLOGY}\nversion: 1.0.1\ndescription: installer fixture\ninstallable: true\n"
+        ),
+    )
+    .expect("failed to bump fixture topology version");
+    fs::write(topology_dir.join("agent/payload.txt"), b"v2")
+        .expect("failed to update fixture payload");
+    let dry_run = run_cli_without_agent_dir(
+        &temp,
+        &[
+            "update",
+            "--alias",
+            alias,
+            "--dry-run",
+            "--version",
+            "1.0.1",
+        ],
+    );
+    assert_success(&dry_run);
+    assert_eq!(
+        fs::read(&registry_path).expect("registry is missing after dry-run"),
+        initial_registry_bytes,
+        "dry-run changed the alias registry"
+    );
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        initial_target_snapshot,
+        "dry-run changed installed target files"
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest is missing after dry-run"),
+        initial_manifest_bytes,
+        "dry-run changed the installed manifest"
+    );
+    assert_eq!(
+        fs::read(&payload).expect("installed payload is missing after dry-run"),
+        b"v1",
+        "dry-run changed the installed payload"
+    );
+
+    let updated =
+        run_cli_without_agent_dir(&temp, &["update", "--alias", alias, "--version", "1.0.1"]);
+    assert_success(&updated);
+
+    assert_eq!(
+        fs::read(&payload).expect("updated payload is missing"),
+        b"v2",
+        "update did not refresh the existing target from its recorded source"
+    );
+    let updated_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("updated manifest is missing"))
+            .expect("updated manifest is not valid JSON");
+    assert_eq!(updated_manifest["topology_version"], "1.0.1");
+
+    let updated_registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry_path).expect("updated registry is missing"))
+            .expect("updated registry is not valid JSON");
+    assert!(
+        updated_registry["aliases"][alias].is_object(),
+        "update removed or renamed alias '{alias}'"
+    );
+    assert_eq!(
+        updated_registry["aliases"][alias]["agent_dir"], initial_target,
+        "update changed the alias target"
+    );
+}
+
+#[test]
+fn update_rejects_downgrade_without_explicit_version() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"NEW")]);
+    let alias = "semver-downgrade";
+    let topology_dir = source.join("topologies").join(TOPOLOGY);
+    fs::write(
+        topology_dir.join("topology.yml"),
+        format!(
+            "name: {TOPOLOGY}\nversion: 1.1.0\ndescription: installer fixture\ninstallable: true\n"
+        ),
+    )
+    .expect("failed to set fixture topology version to 1.1.0");
+
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    assert_success(&installed);
+
+    let payload = agent_dir.join("payload.txt");
+    assert_eq!(
+        fs::read(&payload).expect("initial payload is missing"),
+        b"NEW"
+    );
+    let manifest_path = manifest_path(&temp, &agent_dir);
+    let initial_manifest = fs::read(&manifest_path).expect("initial manifest is missing");
+    let initial_manifest_value: serde_json::Value =
+        serde_json::from_slice(&initial_manifest).expect("initial manifest is not valid JSON");
+    assert_eq!(initial_manifest_value["topology_version"], "1.1.0");
+
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let initial_registry = fs::read(&registry_path).expect("registry is missing");
+    let initial_registry_value: serde_json::Value =
+        serde_json::from_slice(&initial_registry).expect("registry is not valid JSON");
+    let initial_target = initial_registry_value["aliases"][alias]["agent_dir"]
+        .as_str()
+        .expect("registry alias has no target")
+        .to_owned();
+    let initial_target_snapshot = file_snapshot(&agent_dir);
+
+    fs::write(
+        topology_dir.join("topology.yml"),
+        format!(
+            "name: {TOPOLOGY}\nversion: 1.0.0\ndescription: installer fixture\ninstallable: true\n"
+        ),
+    )
+    .expect("failed to downgrade fixture topology version to 1.0.0");
+    assert_eq!(
+        fs::read(topology_dir.join("agent/payload.txt"))
+            .expect("source payload is missing after metadata change"),
+        b"NEW",
+        "downgrade fixture changed the payload instead of only topology metadata"
+    );
+    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    let message = output_text(&updated);
+    assert!(
+        !updated.status.success(),
+        "update unexpectedly permitted downgrade from 1.1.0 to 1.0.0:\n{message}"
+    );
+    let diagnostic = message.to_ascii_lowercase();
+    assert!(
+        diagnostic.contains("downgrade") && message.contains("1.1.0") && message.contains("1.0.0"),
+        "downgrade diagnostic must identify both versions:\n{message}"
+    );
+
+    assert_eq!(fs::read(&payload).expect("payload is missing"), b"NEW");
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        initial_target_snapshot,
+        "downgrade changed installed target files"
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest is missing"),
+        initial_manifest,
+        "downgrade changed the installed manifest"
+    );
+    assert_eq!(
+        fs::read(&registry_path).expect("registry is missing"),
+        initial_registry,
+        "downgrade changed the alias registry"
+    );
+    let registry_after: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry_path).expect("registry is missing"))
+            .expect("updated registry is not valid JSON");
+    assert_eq!(
+        registry_after["aliases"][alias]["agent_dir"], initial_target,
+        "downgrade changed the alias target"
+    );
+}
+#[test]
+fn update_without_version_refreshes_metadata_only_local_source() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let source = local_topology_source_with_version(
+        &temp,
+        "fixture: true\n",
+        &[("payload.txt", b"unchanged payload")],
+        "1.0.0",
+    );
+    let alias = "semver-metadata-upgrade";
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    assert_success(&installed);
+
+    let payload = agent_dir.join("payload.txt");
+    let payload_before = fs::read(&payload).expect("installed payload is missing");
+    let manifest_path = manifest_path(&temp, &agent_dir);
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let initial_registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry_path).expect("registry is missing"))
+            .expect("registry is not valid JSON");
+    let initial_target = initial_registry["aliases"][alias]["agent_dir"]
+        .as_str()
+        .expect("registry alias has no target")
+        .to_owned();
+
+    let topology_file = source
+        .join("topologies")
+        .join(TOPOLOGY)
+        .join("topology.yml");
+    fs::write(
+        &topology_file,
+        format!(
+            "name: {TOPOLOGY}\nversion: 1.0.1\ndescription: installer fixture\ninstallable: true\n"
+        ),
+    )
+    .expect("failed to change only local topology metadata");
+
+    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    assert_success(&updated);
+
+    let updated_manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("updated manifest is missing"))
+            .expect("updated manifest is not valid JSON");
+    assert_eq!(
+        updated_manifest["topology_version"], "1.0.1",
+        "metadata-only update did not refresh the installed topology version"
+    );
+    assert_eq!(
+        fs::read(&payload).expect("installed payload is missing"),
+        payload_before,
+        "metadata-only update changed the unchanged payload"
+    );
+    let updated_registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry_path).expect("registry is missing"))
+            .expect("updated registry is not valid JSON");
+    assert_eq!(
+        updated_registry["aliases"][alias]["agent_dir"], initial_target,
+        "metadata-only update changed the alias target"
+    );
+}
+
+#[test]
+fn update_rejects_invalid_declared_version_without_mutation() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let source = local_topology_source_with_version(
+        &temp,
+        "fixture: true\n",
+        &[("payload.txt", b"unchanged payload")],
+        "1.0.0",
+    );
+    let alias = "semver-invalid-metadata-update";
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    assert_success(&installed);
+
+    let target_before = file_snapshot(&agent_dir);
+    let manifest_path = manifest_path(&temp, &agent_dir);
+    let manifest_before = fs::read(&manifest_path).expect("manifest is missing");
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let registry_before = fs::read(&registry_path).expect("registry is missing");
+    let topology_file = source
+        .join("topologies")
+        .join(TOPOLOGY)
+        .join("topology.yml");
+    fs::write(
+        &topology_file,
+        format!(
+            "name: {TOPOLOGY}\nversion: 1.2\ndescription: installer fixture\ninstallable: true\n"
+        ),
+    )
+    .expect("failed to set invalid local topology version");
+
+    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    let message = output_text(&updated);
+    assert!(
+        !updated.status.success(),
+        "update unexpectedly accepted invalid declared version 1.2:\n{message}"
+    );
+    let diagnostic = message.to_ascii_lowercase();
+    assert!(
+        diagnostic.contains("1.2")
+            && (diagnostic.contains("invalid") || diagnostic.contains("semver")),
+        "invalid declared version diagnostic must identify 1.2 as invalid:\n{message}"
+    );
+    assert_eq!(file_snapshot(&agent_dir), target_before);
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest is missing"),
+        manifest_before,
+        "invalid declared version changed the installed manifest"
+    );
+    assert_eq!(
+        fs::read(&registry_path).expect("registry is missing"),
+        registry_before,
+        "invalid declared version changed the alias registry"
+    );
+}
+
+#[test]
+fn update_with_mismatched_version_fails_before_mutation() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let source = local_topology_source_with_version(
+        &temp,
+        "fixture: true\n",
+        &[("payload.txt", b"source payload")],
+        "1.0.0",
+    );
+    let alias = "semver-update-mismatch";
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    assert_success(&installed);
+
+    let target_before = file_snapshot(&agent_dir);
+    let manifest_path = manifest_path(&temp, &agent_dir);
+    let manifest_before = fs::read(&manifest_path).expect("manifest is missing");
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let registry_before = fs::read(&registry_path).expect("registry is missing");
+
+    let updated =
+        run_cli_without_agent_dir(&temp, &["update", "--alias", alias, "--version", "2.0.0"]);
+    let message = output_text(&updated);
+    assert!(
+        !updated.status.success(),
+        "update unexpectedly accepted requested version 2.0.0 for source version 1.0.0:\n{message}"
+    );
+    assert!(
+        message.contains("2.0.0") && message.contains("1.0.0"),
+        "version mismatch diagnostic must identify requested and declared versions:\n{message}"
+    );
+    assert_eq!(file_snapshot(&agent_dir), target_before);
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest is missing"),
+        manifest_before,
+        "version mismatch changed the installed manifest"
+    );
+    assert_eq!(
+        fs::read(&registry_path).expect("registry is missing"),
+        registry_before,
+        "version mismatch changed the alias registry"
+    );
+}
+
+#[test]
+fn update_rejects_invalid_declared_source_without_mutation() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let source = local_topology_source_with_version(
+        &temp,
+        "fixture: true\n",
+        &[("payload.txt", b"original payload")],
+        "1.0.0",
+    );
+    let alias = "semver-invalid-source-update";
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    assert_success(&installed);
+
+    let target_before = file_snapshot(&agent_dir);
+    let manifest_path = manifest_path(&temp, &agent_dir);
+    let manifest_before = fs::read(&manifest_path).expect("manifest is missing");
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let registry_before = fs::read(&registry_path).expect("registry is missing");
+    let topology_dir = source.join("topologies").join(TOPOLOGY);
+    fs::write(
+        topology_dir.join("topology.yml"),
+        format!(
+            "name: {TOPOLOGY}\nversion: 1.2\ndescription: installer fixture\ninstallable: true\n"
+        ),
+    )
+    .expect("failed to set invalid local topology version");
+    fs::write(
+        topology_dir.join("agent/payload.txt"),
+        b"changed source payload",
+    )
+    .expect("failed to change local topology payload");
+
+    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    let message = output_text(&updated);
+    assert!(
+        !updated.status.success(),
+        "update unexpectedly accepted invalid declared source version 1.2:\n{message}"
+    );
+    let diagnostic = message.to_ascii_lowercase();
+    assert!(
+        diagnostic.contains("1.2")
+            && (diagnostic.contains("invalid") || diagnostic.contains("semver")),
+        "invalid declared source diagnostic must identify 1.2 as invalid:\n{message}"
+    );
+    assert_eq!(file_snapshot(&agent_dir), target_before);
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest is missing"),
+        manifest_before,
+        "invalid declared source changed the installed manifest"
+    );
+    assert_eq!(
+        fs::read(&registry_path).expect("registry is missing"),
+        registry_before,
+        "invalid declared source changed the alias registry"
+    );
+}
+
+#[test]
+fn update_rejects_invalid_installed_version_without_mutation() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let source = local_topology_source_with_version(
+        &temp,
+        "fixture: true\n",
+        &[("payload.txt", b"original payload")],
+        "1.0.0",
+    );
+    let alias = "semver-invalid-installed-version";
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    assert_success(&installed);
+
+    let manifest_path = manifest_path(&temp, &agent_dir);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest is missing"))
+            .expect("manifest is not valid JSON");
+    manifest["topology_version"] = serde_json::json!("1.2");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec(&manifest).expect("failed to encode malformed installed version"),
+    )
+    .expect("failed to set malformed installed version");
+    let manifest_before = fs::read(&manifest_path).expect("manifest is missing");
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let registry_before = fs::read(&registry_path).expect("registry is missing");
+    let target_before = file_snapshot(&agent_dir);
+
+    let topology_dir = source.join("topologies").join(TOPOLOGY);
+    fs::write(
+        topology_dir.join("topology.yml"),
+        format!(
+            "name: {TOPOLOGY}\nversion: 1.1.0\ndescription: installer fixture\ninstallable: true\n"
+        ),
+    )
+    .expect("failed to set source upgrade version");
+    fs::write(
+        topology_dir.join("agent/payload.txt"),
+        b"upgraded source payload",
+    )
+    .expect("failed to change source upgrade payload");
+
+    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    let message = output_text(&updated);
+    assert!(
+        !updated.status.success(),
+        "update unexpectedly accepted malformed installed topology version 1.2:\n{message}"
+    );
+    let diagnostic = message.to_ascii_lowercase();
+    assert!(
+        diagnostic.contains("1.2")
+            && diagnostic.contains("installed")
+            && (diagnostic.contains("invalid") || diagnostic.contains("semver")),
+        "diagnostic must identify the invalid installed SemVer and its source:\n{message}"
+    );
+    assert_eq!(file_snapshot(&agent_dir), target_before);
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest is missing"),
+        manifest_before,
+        "invalid installed version changed the manifest"
+    );
+    assert_eq!(
+        fs::read(&registry_path).expect("registry is missing"),
+        registry_before,
+        "invalid installed version changed the alias registry"
+    );
+}
+fn local_topology_source_with_version(
+    temp: &TestDir,
+    config: &str,
+    files: &[(&str, &[u8])],
+    version: &str,
+) -> PathBuf {
+    let source = local_topology_source(temp, config, files);
+    let topology_file = source
+        .join("topologies")
+        .join(TOPOLOGY)
+        .join("topology.yml");
+    fs::write(
+        topology_file,
+        format!(
+            "name: {TOPOLOGY}\nversion: {version}\ndescription: installer fixture\ninstallable: true\n"
+        ),
+    )
+    .expect("failed to set local topology version");
+    source
+}
+
+#[test]
+fn install_with_matching_version_writes_payload_and_manifest_version() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let payload = b"versioned topology payload";
+    let source = local_topology_source_with_version(
+        &temp,
+        "fixture: true\n",
+        &[("payload.txt", payload)],
+        "1.2.3",
+    );
+
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--version", "1.2.3"]);
+    assert_success(&installed);
+
+    assert_eq!(
+        fs::read(agent_dir.join("payload.txt")).expect("installed payload is missing"),
+        payload
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(manifest_path(&temp, &agent_dir)).expect("manifest is missing"),
+    )
+    .expect("manifest is not valid JSON");
+    assert_eq!(manifest["topology_version"], "1.2.3");
+}
+
+#[test]
+fn install_with_mismatched_version_fails_before_mutation() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let existing = agent_dir.join("existing.txt");
+    fs::write(&existing, b"pre-existing target file").expect("failed to seed target file");
+    let source = local_topology_source_with_version(
+        &temp,
+        "fixture: true\n",
+        &[("payload.txt", b"source topology payload")],
+        "1.2.3",
+    );
+    let source_topology = source.join("topologies").join(TOPOLOGY);
+    let source_metadata_before =
+        fs::read(source_topology.join("topology.yml")).expect("source metadata is missing");
+    let source_payload_before =
+        fs::read(source_topology.join("agent/payload.txt")).expect("source payload is missing");
+    let target_files_before = files_under(&agent_dir);
+    let state_before = state_snapshot_without_manifest(&temp.state_home());
+    let registry = temp.state_home().join("omp-topology/registry.json");
+
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--version", "2.0.0"]);
+    let message = output_text(&installed);
+    assert!(
+        !installed.status.success(),
+        "install unexpectedly accepted requested version 2.0.0 for topology version 1.2.3:\n{message}"
+    );
+    assert!(
+        message.contains("2.0.0") && message.contains("1.2.3"),
+        "version mismatch diagnostic must include requested version 2.0.0 and actual version 1.2.3:\n{message}"
+    );
+
+    assert_eq!(
+        fs::read(source_topology.join("topology.yml")).expect("source metadata disappeared"),
+        source_metadata_before,
+        "version mismatch changed source metadata"
+    );
+    assert_eq!(
+        fs::read(source_topology.join("agent/payload.txt")).expect("source payload disappeared"),
+        source_payload_before,
+        "version mismatch changed source payload"
+    );
+    assert_eq!(files_under(&agent_dir), target_files_before);
+    assert_eq!(
+        fs::read(&existing).expect("target file disappeared"),
+        b"pre-existing target file",
+        "version mismatch changed target file"
+    );
+    assert!(
+        !manifest_path(&temp, &agent_dir).exists(),
+        "version mismatch wrote an install manifest"
+    );
+    assert!(!registry.exists(), "version mismatch wrote the registry");
+    assert_eq!(
+        state_snapshot_without_manifest(&temp.state_home()),
+        state_before,
+        "version mismatch changed installer state"
+    );
+    assert!(
+        !temp.state_home().exists(),
+        "rejected install created the previously absent state root"
+    );
+}
+
+#[test]
+fn install_with_invalid_requested_version_fails_before_mutation() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let existing = agent_dir.join("existing.txt");
+    fs::write(&existing, b"pre-existing target file").expect("failed to seed target file");
+    let source = local_topology_source_with_version(
+        &temp,
+        "fixture: true\n",
+        &[("payload.txt", b"source topology payload")],
+        "1.2.3",
+    );
+    let source_topology = source.join("topologies").join(TOPOLOGY);
+    let source_metadata_before =
+        fs::read(source_topology.join("topology.yml")).expect("source metadata is missing");
+    let source_payload_before =
+        fs::read(source_topology.join("agent/payload.txt")).expect("source payload is missing");
+    let target_files_before = files_under(&agent_dir);
+    let state_before = state_snapshot_without_manifest(&temp.state_home());
+    let registry = temp.state_home().join("omp-topology/registry.json");
+
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--version", "not-semver"]);
+    let message = output_text(&installed);
+    assert!(
+        !installed.status.success(),
+        "install unexpectedly accepted invalid requested version not-semver:\n{message}"
+    );
+    let diagnostic = message.to_ascii_lowercase();
+    assert!(
+        diagnostic.contains("not-semver")
+            && (diagnostic.contains("semver") || diagnostic.contains("semantic version")),
+        "invalid requested version diagnostic must identify not-semver as invalid SemVer:\n{message}"
+    );
+
+    assert_eq!(
+        fs::read(source_topology.join("topology.yml")).expect("source metadata disappeared"),
+        source_metadata_before,
+        "invalid requested version changed source metadata"
+    );
+    assert_eq!(
+        fs::read(source_topology.join("agent/payload.txt")).expect("source payload disappeared"),
+        source_payload_before,
+        "invalid requested version changed source payload"
+    );
+    assert_eq!(files_under(&agent_dir), target_files_before);
+    assert_eq!(
+        fs::read(&existing).expect("target file disappeared"),
+        b"pre-existing target file",
+        "invalid requested version changed target file"
+    );
+    assert!(
+        !manifest_path(&temp, &agent_dir).exists(),
+        "invalid requested version wrote an install manifest"
+    );
+    assert!(
+        !registry.exists(),
+        "invalid requested version wrote the registry"
+    );
+    assert_eq!(
+        state_snapshot_without_manifest(&temp.state_home()),
+        state_before,
+        "invalid requested version changed installer state"
+    );
+}
+
+#[test]
+fn install_without_version_rejects_invalid_topology_metadata() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let existing = agent_dir.join("existing.txt");
+    fs::write(&existing, b"pre-existing target file").expect("failed to seed target file");
+    let source = local_topology_source_with_version(
+        &temp,
+        "fixture: true\n",
+        &[("payload.txt", b"source topology payload")],
+        "1.2",
+    );
+    let source_topology = source.join("topologies").join(TOPOLOGY);
+    let source_metadata_before =
+        fs::read(source_topology.join("topology.yml")).expect("source metadata is missing");
+    let source_payload_before =
+        fs::read(source_topology.join("agent/payload.txt")).expect("source payload is missing");
+    let target_files_before = files_under(&agent_dir);
+    let state_before = state_snapshot_without_manifest(&temp.state_home());
+    let registry = temp.state_home().join("omp-topology/registry.json");
+
+    let installed = install_from_source(&temp, &agent_dir, &source, &[]);
+    let message = output_text(&installed);
+    assert!(
+        !installed.status.success(),
+        "install unexpectedly accepted invalid declared topology version 1.2:\n{message}"
+    );
+    let diagnostic = message.to_ascii_lowercase();
+    assert!(
+        diagnostic.contains("1.2")
+            && (diagnostic.contains("invalid") || diagnostic.contains("semver")),
+        "invalid topology version diagnostic must identify declared version 1.2 as invalid:\n{message}"
+    );
+
+    assert_eq!(
+        fs::read(source_topology.join("topology.yml")).expect("source metadata disappeared"),
+        source_metadata_before,
+        "invalid topology metadata was changed"
+    );
+    assert_eq!(
+        fs::read(source_topology.join("agent/payload.txt")).expect("source payload disappeared"),
+        source_payload_before,
+        "invalid topology metadata changed source payload"
+    );
+    assert_eq!(files_under(&agent_dir), target_files_before);
+    assert_eq!(
+        fs::read(&existing).expect("target file disappeared"),
+        b"pre-existing target file",
+        "invalid topology metadata changed target file"
+    );
+    assert!(
+        !manifest_path(&temp, &agent_dir).exists(),
+        "invalid topology metadata wrote an install manifest"
+    );
+    assert!(
+        !registry.exists(),
+        "invalid topology metadata wrote the registry"
+    );
+    assert_eq!(
+        state_snapshot_without_manifest(&temp.state_home()),
+        state_before,
+        "invalid topology metadata changed installer state"
+    );
+    assert!(
+        !temp.state_home().exists(),
+        "rejected install created the previously absent state root"
     );
 }
 

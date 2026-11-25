@@ -62,6 +62,15 @@ omp-topology install -t <name> \
 <Note any topology-specific install considerations: required `--profile`,
 `--skills-dir`, or follow-up configuration. Omit if none.>
 
+## Versioning
+
+This topology follows [Semantic Versioning](https://semver.org): every change
+to its payload or metadata bumps `version` in `topology.yml` and is recorded
+in [`CHANGELOG.md`](CHANGELOG.md) (Keep-a-Changelog style). These versions
+are independent of the `omp-topology` CLI's own releases. Use
+`omp-topology update --alias <alias> --version X.Y.Z` to assert the exact
+version an update installs.
+
 ## Limits
 
 <Known boundaries: what the topology deliberately does not do, unverified
@@ -73,6 +82,7 @@ misuse; an empty "Limits" section on a non-trivial topology is a smell.>
 | File | Contents |
 |---|---|
 | `topology.yml` | Manifest: `name`, `version`, `description`, optional `profile` |
+| `CHANGELOG.md` | Per-topology version history; one dated entry per `version` bump |
 | `agent/RULES.md` | Top-level orchestration policy |
 | `agent/config.yml` | Task and model-role overlay |
 | `agent/agents/` | Agent definitions |

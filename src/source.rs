@@ -876,60 +876,45 @@ pub fn prune_cache(
     Ok(removed)
 }
 
-/// Deterministic digest of a topology's `agent/` overlay for drift status.
+/// Deterministic digest of a topology's declared metadata and `agent/`
+/// overlay for drift status.
 ///
-/// Every overlay file — sorted by relative path, `config.yml` included,
-/// same safety rules as [`topology::source_agent_files`] — feeds
-/// `path NUL length contents 0xFF` into one SHA-256. Contents stream
-/// through a fixed-size stack buffer, so digest memory is O(1) no matter
-/// how large the overlay or its largest file grows; `length` is the
-/// file's lstat size recorded in the framing, and the streamed byte count
-/// must match it exactly — a file that shrinks or grows mid-hash fails the
-/// digest instead of silently hashing a torn view. Including `config.yml`
-/// means config-only edits still change the digest; the framing is
-/// unchanged, so digests computed for identical trees remain identical
-/// across machines and runs. An overlay with no files digests the empty
-/// stream.
+/// The topology's own `topology.yml` feeds the hash first, framed as the
+/// relative path `/topology.yml` — a spelling no overlay file can
+/// collide with, since every overlay relative path must pass
+/// [`fsx::safe_rel`] — so metadata-only version bumps still change the
+/// digest. Every overlay file — sorted by relative path, `config.yml`
+/// included, same safety rules as [`topology::source_agent_files`] —
+/// then feeds `path NUL length contents 0xFF` into the same SHA-256.
+/// Contents stream through a fixed-size stack buffer, so digest memory
+/// is O(1) no matter how large the metadata, the overlay, or the largest
+/// file grows; `length` is the file's lstat size recorded in the framing,
+/// and the streamed byte count must match it exactly — a file that
+/// shrinks or grows mid-hash fails the digest instead of silently
+/// hashing a torn view. Metadata and overlay symlinks are rejected
+/// outright, never followed. Including `config.yml` means config-only
+/// edits still change the digest; the framing is unchanged, so digests
+/// computed for identical trees remain identical across machines and
+/// runs. An overlay with no files contributes nothing beyond the
+/// metadata frame.
 pub fn overlay_digest(topology_dir: &Path) -> Result<String, CliError> {
     use sha2::Digest as _;
-    use std::io::Read as _;
 
-    let files = topology::source_overlay_paths(topology_dir)?;
     let mut hasher = sha2::Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
+    // The declared metadata is itself part of the source: a version bump
+    // with no overlay change must still register as drift.
+    let metadata_path = topology_dir.join("topology.yml");
+    hash_framed_file(
+        &mut hasher,
+        "/topology.yml",
+        &metadata_path,
+        &mut buffer,
+        "topology metadata file",
+    )?;
+    let files = topology::source_overlay_paths(topology_dir)?;
     for (rel, path) in &files {
-        let length = std::fs::symlink_metadata(path)
-            .map_err(|err| io_err(path, err))?
-            .len();
-        hasher.update(rel.as_bytes());
-        hasher.update([0]);
-        hasher.update(length.to_le_bytes());
-        let mut file = std::fs::File::open(path).map_err(|err| io_err(path, err))?;
-        let mut remaining = length;
-        while remaining > 0 {
-            let want = remaining.min(buffer.len() as u64) as usize;
-            let read = file
-                .read(&mut buffer[..want])
-                .map_err(|err| io_err(path, err))?;
-            if read == 0 {
-                return Err(CliError::Topology(format!(
-                    "topology overlay file {} changed size while hashing: \
-                     expected {length} bytes, file ended early",
-                    path.display()
-                )));
-            }
-            hasher.update(&buffer[..read]);
-            remaining -= read as u64;
-        }
-        // A final read detects growth past the recorded length.
-        if file.read(&mut buffer).map_err(|err| io_err(path, err))? != 0 {
-            return Err(CliError::Topology(format!(
-                "topology overlay file {} changed size while hashing: \
-                 expected {length} bytes, file kept going",
-                path.display()
-            )));
-        }
-        hasher.update([0xff]);
+        hash_framed_file(&mut hasher, rel, path, &mut buffer, "topology overlay file")?;
     }
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(digest.len() * 2);
@@ -938,6 +923,73 @@ pub fn overlay_digest(topology_dir: &Path) -> Result<String, CliError> {
         hex.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap());
     }
     Ok(hex)
+}
+
+/// Hash one source file into `hasher` under the deterministic
+/// `path NUL length contents 0xFF` framing shared by [`overlay_digest`].
+///
+/// `rel` is the framing path (metadata uses the collision-proof
+/// `/topology.yml` spelling; overlay callers pass their `safe_rel`
+/// relative path), `label` names the file class in diagnostics, and
+/// `buffer` is the caller-owned streaming scratch, keeping digest memory
+/// O(1). The file must be a real, non-symlink regular file, and its
+/// streamed byte count must match the lstat size exactly — a file that
+/// shrinks or grows mid-hash fails instead of silently hashing a torn
+/// view.
+fn hash_framed_file(
+    hasher: &mut sha2::Sha256,
+    rel: &str,
+    path: &Path,
+    buffer: &mut [u8],
+    label: &str,
+) -> Result<(), CliError> {
+    use sha2::Digest as _;
+    use std::io::Read as _;
+
+    let stat = std::fs::symlink_metadata(path).map_err(|err| io_err(path, err))?;
+    if stat.file_type().is_symlink() {
+        return Err(CliError::Topology(format!(
+            "{label} {} is a symlink; refusing to hash it",
+            path.display()
+        )));
+    }
+    if !stat.file_type().is_file() {
+        return Err(CliError::Topology(format!(
+            "{label} {} is not a regular file",
+            path.display()
+        )));
+    }
+    let length = stat.len();
+    hasher.update(rel.as_bytes());
+    hasher.update([0]);
+    hasher.update(length.to_le_bytes());
+    let mut file = std::fs::File::open(path).map_err(|err| io_err(path, err))?;
+    let mut remaining = length;
+    while remaining > 0 {
+        let want = remaining.min(buffer.len() as u64) as usize;
+        let read = file
+            .read(&mut buffer[..want])
+            .map_err(|err| io_err(path, err))?;
+        if read == 0 {
+            return Err(CliError::Topology(format!(
+                "{label} {} changed size while hashing: \
+                 expected {length} bytes, file ended early",
+                path.display()
+            )));
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    // A final read detects growth past the recorded length.
+    if file.read(buffer).map_err(|err| io_err(path, err))? != 0 {
+        return Err(CliError::Topology(format!(
+            "{label} {} changed size while hashing: \
+             expected {length} bytes, file kept going",
+            path.display()
+        )));
+    }
+    hasher.update([0xff]);
+    Ok(())
 }
 #[cfg(test)]
 mod tests {

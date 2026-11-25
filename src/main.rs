@@ -138,6 +138,12 @@ struct InstallArgs {
     /// profile (default) or topology; requires --config-merge
     #[arg(long, value_name = "WHEN", requires = "config_merge")]
     config_precedence: Option<String>,
+    /// Require the resolved topology's declared version to match exactly;
+    /// never a range, and never compared against the recorded version.
+    /// Parsed as strict SemVer, so an invalid value is rejected before
+    /// any source resolution or state/target access.
+    #[arg(long, value_name = "VERSION", value_parser = parse_semver)]
+    version: Option<semver::Version>,
     /// Print the plan, change nothing
     #[arg(long)]
     dry_run: bool,
@@ -221,6 +227,12 @@ struct UpdateArgs {
     /// a successful update
     #[arg(long)]
     source: Option<String>,
+    /// Require the resolved topology's declared version to match exactly;
+    /// never a range, and never compared against the recorded version.
+    /// Parsed as strict SemVer, so an invalid value is rejected before
+    /// any source resolution or state access.
+    #[arg(long, value_name = "VERSION", value_parser = parse_semver)]
+    version: Option<semver::Version>,
     /// Merge the topology config into the active config.yml for this
     /// update only (never remembered)
     #[arg(long, conflicts_with = "config_replace")]
@@ -635,6 +647,15 @@ fn prune_after_failed_install(
     prune_install_source(anchor, source_spec, &extra_retained, out);
 }
 
+/// Parse a `--version` flag as strict SemVer so an invalid value is
+/// rejected by clap, before any source resolution or state/target access,
+/// with a diagnostic that names the bad value.
+fn parse_semver(raw: &str) -> Result<semver::Version, String> {
+    semver::Version::parse(raw).map_err(|err| {
+        format!("'{raw}' is not valid SemVer ({err}); pass an exact version like '1.2.3'")
+    })
+}
+
 fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     require_source_for_ref(&args.source, &args.reference)?;
     let anchor = state_anchor()?;
@@ -763,6 +784,30 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
         preserve_lines(args.json, &out);
         return Err(exc);
     }
+    // Refuse an invalid declared SemVer and a requested-version mismatch
+    // before taking the registry lock: acquiring the lock creates the
+    // state home, and a refused install must leave no side effects
+    // behind. `install::run` repeats this check under the lock before
+    // mutating, so a source edited in between still fails closed.
+    let topology_dir = topology::find_topology(resolved.tree_root(), &args.topology, true)?;
+    let topology_meta = topology::topology_metadata(&topology_dir)?;
+    if let Err(exc) = install::validate_declared_version(
+        &args.topology,
+        &topology_dir.join("topology.yml"),
+        &topology::meta_version(&topology_meta),
+        args.version.as_ref(),
+    ) {
+        let mut out = Vec::new();
+        prune_after_failed_install(
+            &anchor,
+            &source_spec,
+            resolved.commit(),
+            args.dry_run,
+            &mut out,
+        );
+        preserve_lines(args.json, &out);
+        return Err(exc);
+    }
     // Hold the registry lock across the target mutation and the registry
     // commit so a concurrent update/remove cannot interleave with this
     // install — the same serialization update uses.
@@ -816,6 +861,7 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
             config_mode,
             manifest_path: Some(&manifest_path),
             alias: Some(&alias),
+            expected_version: args.version.as_ref(),
         },
         &mut out,
     ) {
@@ -1570,6 +1616,7 @@ fn cmd_update(args: &UpdateArgs) -> Result<i32, CliError> {
             alias: &args.alias,
             reference: args.reference.as_deref(),
             source: args.source.as_deref(),
+            version: args.version.as_ref(),
             state_anchor: &anchor,
             dry_run: args.dry_run,
             config_mode,

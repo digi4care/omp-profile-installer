@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add exact SemVer `--version` assertions to `install` and `update`, and
+  reject updates that would downgrade a valid installed topology version.
+- Document the per-topology SemVer and changelog workflow, and add a
+  changelog for each example topology.
+
+### Fixed
+
+- Include `topology.yml` in local source freshness so metadata-only upgrades,
+  downgrades, and invalid declarations are not skipped as up to date.
+- Reject malformed declared or recorded topology versions before mutation,
+  and preflight install versions before registry locking can create state.
+
 ## [0.2.4] - 2026-11-25
 
 ### Fixed

@@ -19,6 +19,17 @@
 //!   missing manifest simply proceeds to reinstall.
 //! * A `--ref` override always resolves that ref and refreshes the
 //!   recorded ref — even when it resolves to the already-recorded commit.
+//! * A `--version` argument is an exact assertion on the resolved
+//!   topology's declared metadata version, validated before any registry
+//!   or target mutation; the up-to-date shortcut never applies when it is
+//!   given.
+//! * Every update parses the resolved topology's declared version as
+//!   strict SemVer (an invalid declaration fails closed before any
+//!   mutation), and an ownership manifest that records a valid installed
+//!   version rejects a lower resolved version as a downgrade — with or
+//!   without `--version` — before the registry, cache pin, or target
+//!   changes. A manifest that predates version recording has no installed
+//!   version to compare, so it follows the upgrade path instead.
 //! * Otherwise the source is resolved (`resolve` with the persistent cache
 //!   root for a real run, an ephemeral checkout for `--dry-run`), the
 //!   topology is located in the checkout, and [`install::run`] re-applies
@@ -70,6 +81,13 @@ pub struct UpdateOptions<'a> {
     /// the new source, but the registry commits it only after the install
     /// lands; a failed update keeps the previously recorded source.
     pub source: Option<&'a str>,
+    /// Exact topology metadata version assertion: when given, the resolved
+    /// topology's declared `version` must equal this version exactly, checked
+    /// before any registry or target mutation. This is never a range and is
+    /// never compared against the previously recorded version. The CLI parses
+    /// the flag as strict SemVer, so an unparsable value is rejected before
+    /// any source resolution or state access.
+    pub version: Option<&'a semver::Version>,
     /// Config handling for this update only; never remembered.
     pub config_mode: crate::config_mode::ConfigMode,
     /// Stable XDG state anchor for the registry document and ownership
@@ -157,8 +175,10 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
 
     // A source override always re-resolves and re-installs: the recorded
     // pin belongs to the old source, so the up-to-date shortcut cannot
-    // apply.
-    if opts.reference.is_none() && opts.source.is_none() {
+    // apply. A `--version` assertion also forces re-resolution: the
+    // declared metadata version must be read from the resolved source
+    // before it can be validated.
+    if opts.reference.is_none() && opts.source.is_none() && opts.version.is_none() {
         // With the manifest healthy (present and matching) only the
         // freshness half of the status is needed for the skip decision;
         // a missing manifest must not skip, even when the pin is still
@@ -215,6 +235,156 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
         }
     };
 
+    // SemVer gate, before any registry or target mutation so every
+    // refusal below leaves both untouched:
+    //
+    // * The resolved topology's declared `version` must be strict SemVer;
+    //   an unparsable declaration fails closed instead of being compared
+    //   ad hoc. A requested `--version` must be strict SemVer too, and —
+    //   as before — must equal the declared version exactly (an assertion,
+    //   never a range).
+    // * An ownership manifest that records a valid installed version must
+    //   not be downgraded: a lower resolved version is refused with both
+    //   versions named. A manifest that predates version recording (no
+    //   `topology_version`) has nothing to compare against and proceeds.
+    // * An installed version that is present but unusable — a non-string
+    //   value, or a string that is not valid SemVer — fails closed with
+    //   [`CliError::Manifest`]: installs always record strict SemVer here,
+    //   so such a manifest was edited or corrupted, and ordering against
+    //   it would be guesswork. The refusal names the alias, the
+    //   `topology_version` field, and the offending value, and happens
+    //   before any registry or target mutation.
+    let manifest = match state::load_manifest_at(&manifest_path, opts.state_anchor) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            if !opts.dry_run {
+                prune_source_cache(
+                    &source_spec,
+                    resolved_commit.as_deref(),
+                    opts.state_anchor,
+                    out,
+                );
+            }
+            return Err(err);
+        }
+    };
+    let declared = match topology::topology_metadata(&topology_dir) {
+        Ok(meta) => topology::meta_version(&meta),
+        Err(err) => {
+            if !opts.dry_run {
+                prune_source_cache(
+                    &source_spec,
+                    resolved_commit.as_deref(),
+                    opts.state_anchor,
+                    out,
+                );
+            }
+            return Err(err);
+        }
+    };
+    let source_version = match semver::Version::parse(&declared) {
+        Ok(version) => version,
+        Err(err) => {
+            if !opts.dry_run {
+                prune_source_cache(
+                    &source_spec,
+                    resolved_commit.as_deref(),
+                    opts.state_anchor,
+                    out,
+                );
+            }
+            return Err(CliError::Topology(format!(
+                "refusing to update alias '{}': topology '{}' declares version \
+                 '{declared}', which is not valid SemVer ({err}); fix the \
+                 topology's topology.yml before updating",
+                opts.alias, entry.topology
+            )));
+        }
+    };
+    if let Some(expected) = opts.version
+        && *expected != source_version
+    {
+        if !opts.dry_run {
+            prune_source_cache(
+                &source_spec,
+                resolved_commit.as_deref(),
+                opts.state_anchor,
+                out,
+            );
+        }
+        return Err(CliError::Usage(format!(
+            "refusing to update alias '{}': requested version \
+             '{expected}' but topology '{}' declares version \
+             '{declared}' at source '{spec_text}'; pass the declared \
+             version or drop --version to accept it",
+            opts.alias, entry.topology
+        )));
+    }
+    if let Some(manifest) = manifest.as_ref()
+        && let Some(recorded) = manifest.get("topology_version")
+    {
+        let installed = match recorded {
+            serde_json::Value::String(raw) => match semver::Version::parse(raw) {
+                Ok(version) => version,
+                Err(err) => {
+                    if !opts.dry_run {
+                        prune_source_cache(
+                            &source_spec,
+                            resolved_commit.as_deref(),
+                            opts.state_anchor,
+                            out,
+                        );
+                    }
+                    return Err(CliError::Manifest(format!(
+                        "refusing to update alias '{}': the installed \
+                         manifest in {} records topology_version '{raw}', \
+                         which is not valid SemVer ({err}); fix the \
+                         installed manifest or remove and reinstall the \
+                         alias to replace the recorded version",
+                        opts.alias,
+                        manifest_path.display(),
+                    )));
+                }
+            },
+            other => {
+                if !opts.dry_run {
+                    prune_source_cache(
+                        &source_spec,
+                        resolved_commit.as_deref(),
+                        opts.state_anchor,
+                        out,
+                    );
+                }
+                return Err(CliError::Manifest(format!(
+                    "refusing to update alias '{}': the installed manifest \
+                     in {} records topology_version as {other}, which must \
+                     be a SemVer string; fix the installed manifest or \
+                     remove and reinstall the alias to replace the \
+                     recorded version",
+                    opts.alias,
+                    manifest_path.display(),
+                )));
+            }
+        };
+        if source_version < installed {
+            if !opts.dry_run {
+                prune_source_cache(
+                    &source_spec,
+                    resolved_commit.as_deref(),
+                    opts.state_anchor,
+                    out,
+                );
+            }
+            return Err(CliError::Usage(format!(
+                "refusing to update alias '{}': downgrade from installed \
+                 version {installed} to source version {declared} at source \
+                 '{spec_text}'; reinstall a newer topology, or remove and \
+                 reinstall the alias to replace the installed topology",
+                opts.alias
+            )));
+        }
+    }
+
     let agent_dir_text = entry.agent_dir.to_string_lossy().into_owned();
 
     // Precompute every fallible piece of post-install metadata BEFORE any
@@ -267,6 +437,9 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
                 config_mode: opts.config_mode,
                 manifest_path: Some(&manifest_path),
                 alias: Some(opts.alias),
+                // Update already asserted the exact version above; the
+                // reinstall only re-records the declared metadata string.
+                expected_version: None,
             },
             &mut install_out,
         ) {
@@ -422,6 +595,9 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
             config_mode: opts.config_mode,
             manifest_path: Some(&manifest_path),
             alias: Some(opts.alias),
+            // Update already asserted the exact version above; the
+            // reinstall only re-records the declared metadata string.
+            expected_version: None,
         },
         &mut install_out,
     ) {

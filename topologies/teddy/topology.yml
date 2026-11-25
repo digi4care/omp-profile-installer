@@ -1,6 +1,6 @@
 # Topology metadata for the omp-topology installer.
 name: teddy
-version: 1.0.0
+version: 1.0.1
 description: >-
   Six-domain digital product studio with Teddy-derived planning practices:
   the main session routes work across product-strategy, engineering, QA,

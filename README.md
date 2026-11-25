@@ -44,6 +44,7 @@ with no server to run and no sudo required.
 
 **Operations**
 - [⚙️ Installing and Updating the CLI](#️-installing-and-updating-the-cli)
+- [📦 Topology Versioning and Updates](#-topology-versioning-and-updates)
 - [🧱 Project Structure](#-project-structure)
 - [🔧 Configuration Matrix](#-configuration-matrix)
 
@@ -136,8 +137,9 @@ main→profile symlinks are followed with identity checks.
 
 ### 🔄 In-place updates
 `update --alias <name>` re-applies the recorded install against
-the current source pin — a no-op when current, with `--ref` and
-`--source` overrides for deliberate retargeting.
+the current source pin — a no-op when current, refusing
+downgrades, with `--ref`, `--version`, and `--source` overrides
+for deliberate retargeting.
 
 </td>
 <td width="33%" valign="top">
@@ -290,7 +292,8 @@ The day-to-day lifecycle is `list → install → status → update → remove`:
    whether the ownership manifest is healthy, and whether the source has moved
    on (`up to date` / `update available` / `unknown`).
 5. **Update.** `update --alias <name>` re-applies the recorded install against
-   the current pin; it is a no-op (no clone) when already current.
+   the current pin; it is a no-op (no clone) when already current and refuses
+   to move the install to an older topology version.
 6. **Remove.** `remove --alias <name>` restores prior config values and deletes
    what the topology added under that alias. Files you edited after install are
    preserved and listed, and the removal stays retryable until everything is
@@ -299,6 +302,74 @@ The day-to-day lifecycle is `list → install → status → update → remove`:
 Every command accepts `--json`, which emits exactly one JSON document on stdout;
 in human mode the captured command lines are printed unchanged. Failures print
 `error: <message>` on stderr and exit 1.
+
+---
+
+## 📦 Topology Versioning and Updates
+
+Every topology carries its own [SemVer](https://semver.org) version in its
+`topology.yml` `version` field, plus its own Keep-a-Changelog-style
+`CHANGELOG.md` next to the manifest. These versions are independent of each
+other and of the CLI's own release version.
+
+**Versioning contract for topology authors:**
+
+- **Every change bumps the version.** Any change to a topology's payload or
+  metadata — `agent/` files, `topology.yml` fields, included docs that ship
+  with the payload — requires a SemVer bump in the same PR, with a matching
+  entry in that topology's `CHANGELOG.md`. There is no "trivial" topology
+  change that skips the bump: `update`'s downgrade check and exact
+  `--version` assertions compare against the declared version. `status`
+  never compares versions — it reports source commit/digest freshness.
+- **Bump semantics.** `major` for changes that alter the topology's contract
+  with its users (routing model, role boundaries, approval gates, removed or
+  renamed agents/skills/config keys); `minor` for additive, backward
+  compatible changes (a new agent or skill, a new optional config key); `patch`
+  for fixes and clarifications that do not change the contract (policy
+  corrections, ownership fixes, wording).
+- **CLI releases are separate.** `omp-topology self-update --version` (and the
+  bootstrap's `--version`) pin the *CLI* release; topology versions live in
+  `topology.yml` and never move the CLI.
+
+**Versioning contract for users:**
+
+- `--ref` selects *which Git ref of the source tree* is read — a branch, tag,
+  or commit. It only picks the checkout; it does not imply a topology version.
+- `--version` on `install` and `update` is an **exact SemVer assertion**, not
+  a tag resolver: the command succeeds only if the selected source's
+  `topology.yml` declares exactly that version, and fails otherwise. Combine
+  it with `--ref` when you need both a specific ref and a specific declared
+  version.
+- `update --alias <name>` always targets the install recorded under that
+  *existing* alias and re-applies it against the selected source. It refuses
+  to move an install to an older topology version — downgrades are rejected,
+  so a stale `--ref` or an older source cannot silently roll you back.
+
+**Verifying an update from version X to Y** (use an alias that already
+exists — `update` does not create installs):
+
+```sh
+# 1. Dry-run against the existing alias; change nothing. The plan lists the
+#    planned file and config changes but prints no version numbers. The
+#    --version 2.0.1 assertion is itself the version proof: the command
+#    fails here unless the selected source's topology.yml declares exactly
+#    2.0.1.
+omp-topology update --alias digital-product-studio \
+  --ref main --version 2.0.1 --dry-run
+
+# 2. Apply for real once the plan looks right. The same --version assertion
+#    is re-checked before anything is mutated.
+omp-topology update --alias digital-product-studio \
+  --ref main --version 2.0.1
+
+# 3. Confirm what the registry records: source, commit/digest, and
+#    freshness. status compares commit/digest freshness only and does not
+#    print a topology version.
+omp-topology status --alias digital-product-studio
+```
+
+Omit `--ref` to update against the source recorded at install time; omit
+`--version` when you do not need to assert the exact target version.
 
 ---
 
@@ -410,7 +481,7 @@ Defaults below are what the code actually applies when the option is absent.
 | Variable / flag | Applies to | What it does | Default |
 |---|---|---|---|
 | `--source` | `list`, `install`, `update` | Topology source: `github:OWNER/REPO`, an HTTPS GitHub URL, or a local path containing `topologies/` | current checkout root (installed binaries must pass it) |
-| `--ref` | `list`, `install`, `update` | For list/install, a branch, tag, or full 40-hex SHA requiring a GitHub `--source`. For update, optionally overrides the recorded GitHub source's ref without a new `--source`; invalid with a local source. | the remote's default `HEAD` |
+| `--ref` | `list`, `install`, `update` | Selects which Git ref of the source is read — a branch, tag, or full 40-hex SHA; it picks the checkout only and never resolves a topology version. For list/install it requires a GitHub `--source`. For update, optionally overrides the recorded GitHub source's ref without a new `--source`; invalid with a local source. | the remote's default `HEAD` |
 | `--profile` | `install`, `remove`, `status` | Target profile, resolved via `omp --profile NAME config path` (mutually exclusive with `--agent-dir`) | ambient profile from `omp config path` |
 | `--agent-dir` | `install`, `remove`, `status` | Explicit target agent directory | — |
 | `--alias` | `install`, `remove`, `status`, `update` | Stable registry alias selecting the install | profile name, else lowercased agent-dir basename; `update` requires it |
@@ -419,7 +490,7 @@ Defaults below are what the code actually applies when the option is absent.
 | `--config-replace` | `install`, `update` | Replace the active config; the pre-replacement config is restored on `remove` | candidate mode |
 | `--dry-run` | `install`, `remove`, `update`, `self-update` | Print the plan without topology, registry, or persistent source-cache writes; named-profile resolution may invoke OMP and create missing profile directories | off |
 | `--json` | all commands | Exactly one JSON document on stdout instead of human lines | human mode |
-| `--version` | `self-update` | Release to install | latest published release |
+| `--version` | `install`, `update`, `self-update` | On `install`/`update`: an exact SemVer assertion against the selected source's `topology.yml` `version` — the command fails on mismatch; it is not a tag resolver. On `self-update`: the CLI release to install | no assertion; `self-update` uses the latest published release |
 | `OMP_PROFILE`, `PI_PROFILE` | target resolution | Active profile name for the ambient target | `default` |
 | `XDG_STATE_HOME` | state location | Root for the registry, manifests, snapshots, and source cache | `~/.local/state/omp-topology` |
 | `OMP_TOPOLOGY_BIN_DIR` / `--bin-dir` | `install-release.sh` | Install directory for the CLI binary | `~/.local/bin` |
