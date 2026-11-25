@@ -102,13 +102,32 @@ jobs:
 
               # Mirror src/value.rs display_metadata: nil -> "", booleans ->
               # True/False, integral floats -> one decimal, sequences joined
-              # with ", ", maps -> "".
+              # with ", ", maps -> "". Non-integral floats must render like
+              # Rust's f64 Display: shortest round-trip digits in plain
+              # decimal, never scientific notation. Ruby's Float#to_s
+              # switches to exponential form (0.00001 -> 1.0e-05), so
+              # re-expand it to the plain decimal Rust prints.
+              plain_float = lambda do |value|
+                text = value.to_s
+                match = /\A(-?)(\d)\.(\d+)e([+-]?\d+)\z/.match(text)
+                next text unless match
+                sign = match[1]
+                digits = (match[2] + match[3]).sub(/0+\z/, "")
+                point = 1 + match[4].to_i
+                if point <= 0
+                  "#{sign}0.#{'0' * -point}#{digits}"
+                elsif point >= digits.length
+                  "#{sign}#{digits}#{'0' * (point - digits.length)}"
+                else
+                  "#{sign}#{digits[0, point]}.#{digits[point..]}"
+                end
+              end
               render = lambda do |value|
                 case value
                 when nil then ""
                 when true then "True"
                 when false then "False"
-                when Float then value.fract.zero? ? format("%.1f", value) : value.to_s
+                when Float then value == value.truncate ? format("%.1f", value) : plain_float.call(value)
                 when Array then value.map { |item| render.call(item) }.join(", ")
                 when Hash then ""
                 else value.to_s
