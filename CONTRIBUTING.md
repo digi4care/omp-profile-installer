@@ -110,7 +110,11 @@ compares versions; it reports source commit/digest freshness.)
   ```
 
   The full local gate is `cargo test --locked` plus `scripts/rust-gates.sh`
-  (the same entry point the Rust gates workflow runs).
+  (the same entry point the Rust gates workflow runs). For repeated Docker
+  runs, `compose.yaml` keeps a persistent toolchain container with warm Cargo
+  caches: `docker compose up -d --build`, then
+  `docker compose exec rust ./scripts/rust-gates.sh`. `docker compose down`
+  preserves the caches; `docker compose down -v` deletes them.
 
 - Continuous integration runs one workflow per input domain on every pull
   request, each gated to the files it verifies:

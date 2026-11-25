@@ -1,0 +1,32 @@
+# Persistent Rust 1.100.0 dev environment with warm Cargo caches.
+# Canonical workflow (see README.md):
+#   docker compose up -d --build
+#   docker compose exec rust ./scripts/rust-gates.sh
+#   docker compose down        # keeps caches; `down -v` deletes them
+services:
+  rust:
+    build: .
+    image: omp-topology-rust-dev
+    init: true
+    working_dir: /workspace
+    command: sleep infinity
+    environment:
+      # Tells scripts/rust-gates.sh it is already inside the toolchain
+      # container, so it runs cargo directly instead of nested Docker.
+      OMP_TOPOLOGY_RUST_CONTAINER: "1"
+      # Caches live on named volumes; the image's cargo/rustup binaries in
+      # /usr/local stay on PATH untouched.
+      CARGO_HOME: /cache/cargo
+      CARGO_TARGET_DIR: /cache/target
+    volumes:
+      - .:/workspace
+      - cargo-home:/cache/cargo
+      - cargo-target:/cache/target
+
+volumes:
+  # Fixed names so `up` after `down` (or from another checkout path) reuses
+  # the same caches instead of creating per-project copies.
+  cargo-home:
+    name: omp-topology-cargo-home
+  cargo-target:
+    name: omp-topology-cargo-target

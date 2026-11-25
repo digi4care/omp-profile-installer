@@ -5,10 +5,12 @@
 # what the GitHub Actions pull-request workflow (.github/workflows/rust-gates.yml)
 # invokes, so local and CI results always come from the same pinned toolchain.
 #
-# Requires: docker.
+# Requires: docker, unless OMP_TOPOLOGY_RUST_CONTAINER=1 selects the
+# already-containerized path used by compose.yaml.
 #
 # Toolchain: rust:1.100.0 (matches rust-toolchain.toml). rustfmt and clippy
-# are installed inside the container; no host Rust toolchain is needed.
+# are installed by the outer Docker path and preinstalled in the Compose image;
+# no host Rust toolchain is needed.
 #
 # Gates (any failure fails the script):
 #   cargo fmt --all -- --check
@@ -19,16 +21,21 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IMAGE="rust:1.100.0"
 
-# Build artifacts go to a container-local scratch dir, never the host
-# repository's (possibly root-owned or reused) target/ directory.
-exec docker run --rm \
-    --volume "$ROOT":/repo \
-    --workdir /repo \
-    --env CARGO_TARGET_DIR=/tmp/omp-topology-target \
-    "$IMAGE" sh -c '
-        set -eu
-        rustup component add rustfmt clippy
-        cargo fmt --all -- --check
-        cargo clippy --locked --all-targets -- -D warnings
-        cargo test --locked
-    '
+if [ "${OMP_TOPOLOGY_RUST_CONTAINER:-0}" != "1" ]; then
+    # Build artifacts go to a container-local scratch dir, never the host
+    # repository's (possibly root-owned or reused) target/ directory.
+    exec docker run --rm \
+        --volume "$ROOT":/repo \
+        --workdir /repo \
+        --env CARGO_TARGET_DIR=/tmp/omp-topology-target \
+        --env OMP_TOPOLOGY_RUST_CONTAINER=1 \
+        "$IMAGE" sh -c '
+            set -eu
+            rustup component add rustfmt clippy
+            exec ./scripts/rust-gates.sh
+        '
+fi
+
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked

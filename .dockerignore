@@ -1,0 +1,4 @@
+# Keep the image build context small; the dev container never COPYs source
+# (the repository is bind-mounted at /workspace by compose.yaml).
+.git
+target

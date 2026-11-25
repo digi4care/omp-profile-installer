@@ -119,8 +119,11 @@ struct InstallArgs {
     /// Target agent directory (default: 'omp config path' for the profile)
     #[arg(long)]
     agent_dir: Option<String>,
-    /// Stable registry alias (default: the profile name, or the
-    /// lowercased basename of the agent directory)
+    /// Stable registry alias for this install (default: the profile
+    /// name, or the lowercased basename of the agent directory). An
+    /// alias does not select a profile: an alias-only install targets
+    /// the ambient/default profile's agent directory; pass --profile
+    /// NAME or --agent-dir PATH to select another target.
     #[arg(long)]
     alias: Option<String>,
     /// Explicit skills root: only skills/* install there
@@ -696,6 +699,58 @@ fn path_collision_error(alias: &str, colliding: &Path) -> CliError {
     ))
 }
 
+/// Enrich a refused install with recovery guidance when a collision
+/// diagnostic names an owner: the collision error carries the aliases
+/// recorded as owning the colliding files, and the guidance names the
+/// first listed owner whose registry entry targets the same agent
+/// directory under a different topology. It is a no-op for every other
+/// error — unrelated usage failures (symlinked skills roots, config
+/// refusals) and unowned collisions pass through untouched — and when
+/// no listed owner is registered at the target under a different
+/// topology.
+fn cross_topology_guidance(
+    exc: CliError,
+    registry_doc: &registry::Registry,
+    alias: &str,
+    topology: &str,
+    agent_dir: &Path,
+) -> CliError {
+    let (message, owners) = match exc {
+        CliError::InstallCollision { message, owners } => (message, owners),
+        other => return other,
+    };
+    // The owners come from the collision diagnostics themselves, so the
+    // guidance can never name an alias that owns none of the colliding
+    // files. An owner whose registration changed (different target, or
+    // the same topology the user requested) is not a recovery anchor.
+    let owner = owners.iter().find_map(|owner_alias| {
+        let entry = registry_doc.get(owner_alias)?;
+        (owner_alias.as_str() != alias
+            && entry.agent_dir == agent_dir
+            && entry.topology != topology)
+            .then_some((owner_alias, entry))
+    });
+    let Some((owner_alias, owner_entry)) = owner else {
+        return CliError::Usage(message);
+    };
+    CliError::Usage(format!(
+        "{message}\n\
+         guidance: '{owner_topology}' is already installed at {target} \
+         under alias '{owner_alias}'; the requested topology is \
+         '{topology}'.\n\
+         - To keep both topologies, install '{topology}' into a \
+         separate target instead: pass --profile {topology} (or \
+         --agent-dir PATH) so the two installs do not share files.\n\
+         - To update the existing '{owner_topology}' installation, \
+         run: omp-topology update --alias {owner_alias}. This keeps \
+         '{owner_topology}'; it does not install '{topology}'.",
+        owner_topology = owner_entry.topology,
+        target = agent_dir.display(),
+        owner_alias = owner_alias,
+        topology = topology,
+    ))
+}
+
 fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     require_source_for_ref(&args.source, &args.reference)?;
     let anchor = state_anchor()?;
@@ -864,7 +919,13 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
             &mut out,
         );
         preserve_lines(args.json, &out);
-        return Err(exc);
+        return Err(cross_topology_guidance(
+            exc,
+            &registry_doc,
+            &alias,
+            &args.topology,
+            &target.agent_dir,
+        ));
     }
     // Refuse an invalid declared SemVer and a requested-version mismatch
     // before taking the registry lock: acquiring the lock creates the
@@ -900,8 +961,12 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     };
     // Re-decide the ownership slot under the lock: the preflight snapshot
     // may predate a concurrent registration, and the slot decides every
-    // ownership-manifest read/write below.
-    let (manifest_slot, manifest_path) = if _lock.is_some() {
+    // ownership-manifest read/write below. The locked registry document
+    // is retained through `install::run` so run-error recovery guidance
+    // resolves collision owners against the same snapshot the install
+    // ran against; dry runs hold no lock and fall back to the pre-lock
+    // registry.
+    let (locked_doc, manifest_slot, manifest_path) = if _lock.is_some() {
         let locked_doc = registry::load_registry(&anchor)?;
         if let Some(existing) = locked_doc.get(&alias)
             && (existing.agent_dir != target.agent_dir || existing.topology != args.topology)
@@ -929,9 +994,9 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
         }
         let slot = manifest_slot_for(&locked_doc, &alias, &target.agent_dir);
         let path = state::manifest_path_for_slot(&target.agent_dir, &anchor, &alias, slot)?;
-        (slot, path)
+        (Some(locked_doc), slot, path)
     } else {
-        (manifest_slot, manifest_path)
+        (None, manifest_slot, manifest_path)
     };
     let mut out = Vec::new();
     let code = match install::run(
@@ -962,7 +1027,17 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
                 &mut out,
             );
             preserve_lines(args.json, &out);
-            return Err(exc);
+            // `run` repeats the collision detection under the lock, so a
+            // target changed in between still fails closed here; enrich
+            // that race refusal with recovery guidance resolved against
+            // the locked registry snapshot the install ran against.
+            return Err(cross_topology_guidance(
+                exc,
+                locked_doc.as_ref().unwrap_or(&registry_doc),
+                &alias,
+                &args.topology,
+                &target.agent_dir,
+            ));
         }
     };
     if code != 0 {
@@ -1581,7 +1656,8 @@ fn emit_unmanaged(
         }
         match &manifest_topology {
             Some(topology) => {
-                println!("manifest topology: {topology} (no registry alias manages this target)")
+                println!("topology manifest: {topology}");
+                println!("registry alias: none");
             }
             None => println!(
                 "no registry alias manages this target and no ownership \
