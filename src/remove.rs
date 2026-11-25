@@ -1529,15 +1529,15 @@ fn skills_restore_pin(skills_pin: &Option<RootFd>, skills_root: &Path) -> Result
 }
 
 fn pin_for<'a>(roots: &'a symlinks::Roots, target: &Path) -> Option<(&'a RootFd, String)> {
-    if let Some(root) = &roots.agent_root {
-        if let Ok(rel) = target.strip_prefix(root.path()) {
-            return Some((root, rel.to_string_lossy().into_owned()));
-        }
+    if let Some(root) = &roots.agent_root
+        && let Ok(rel) = target.strip_prefix(root.path())
+    {
+        return Some((root, rel.to_string_lossy().into_owned()));
     }
-    if let Some(root) = &roots.profiles_root {
-        if let Ok(rel) = target.strip_prefix(root.path()) {
-            return Some((root, rel.to_string_lossy().into_owned()));
-        }
+    if let Some(root) = &roots.profiles_root
+        && let Ok(rel) = target.strip_prefix(root.path())
+    {
+        return Some((root, rel.to_string_lossy().into_owned()));
     }
     None
 }
@@ -1699,14 +1699,11 @@ fn write_under(
 /// content outside the recorded roots). An absent pin is a no-op: the
 /// root does not exist, so the directory cannot exist either.
 fn remove_empty_dir_at(pin: Option<&RootFd>, rel: &str) {
-    match pin {
-        Some(pin) => {
-            if pin.has_symlink_component(rel).unwrap_or(true) {
-                return;
-            }
-            let _ = pin.try_remove_empty_dir(rel);
+    if let Some(pin) = pin {
+        if pin.has_symlink_component(rel).unwrap_or(true) {
+            return;
         }
-        None => {}
+        let _ = pin.try_remove_empty_dir(rel);
     }
 }
 

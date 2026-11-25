@@ -364,9 +364,7 @@ impl RootFd {
     /// The permission bits (`& 0o7777`) of `rel`, or `None` when absent.
     pub fn file_mode(&self, rel: &str) -> io::Result<Option<u32>> {
         match self.walk_parent(rel, None) {
-            Ok((dir, name)) => {
-                Ok(lstat_at(&dir.fd, &name)?.map(|stat| (stat.st_mode & 0o7777) as u32))
-            }
+            Ok((dir, name)) => Ok(lstat_at(&dir.fd, &name)?.map(|stat| stat.st_mode & 0o7777)),
             Err(SubdirError::NotFound) => Ok(None),
             Err(err) => Err(err.into()),
         }

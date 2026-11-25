@@ -896,32 +896,32 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
         }
     }
     let mut skill_deletions: BTreeMap<String, String> = BTreeMap::new();
-    if let Some(root) = &skills_root {
-        if let Some(pin) = &skills_pin {
-            for rel in owned_skill_files.iter() {
-                if skill_sources.contains_key(rel) {
-                    continue;
+    if let Some(root) = &skills_root
+        && let Some(pin) = &skills_pin
+    {
+        for rel in owned_skill_files.iter() {
+            if skill_sources.contains_key(rel) {
+                continue;
+            }
+            let target = root.join(rel);
+            if pin
+                .has_symlink_component(rel)
+                .map_err(|err| io_err(&target, err))?
+            {
+                continue;
+            }
+            let Some(current) = pin.read_file(rel).map_err(|err| io_err(&target, err))? else {
+                continue;
+            };
+            let current_hash = fsx::sha256_hex(&current);
+            if manifest_string(&existing_manifest, "skills_files", rel).as_deref()
+                == Some(current_hash.as_str())
+            {
+                skill_deletions.insert(rel.clone(), current_hash);
+                if let Ok(Some(mode)) = pin.file_mode(rel) {
+                    backup_modes.insert(target.clone(), mode);
                 }
-                let target = root.join(rel);
-                if pin
-                    .has_symlink_component(rel)
-                    .map_err(|err| io_err(&target, err))?
-                {
-                    continue;
-                }
-                let Some(current) = pin.read_file(rel).map_err(|err| io_err(&target, err))? else {
-                    continue;
-                };
-                let current_hash = fsx::sha256_hex(&current);
-                if manifest_string(&existing_manifest, "skills_files", rel).as_deref()
-                    == Some(current_hash.as_str())
-                {
-                    skill_deletions.insert(rel.clone(), current_hash);
-                    if let Ok(Some(mode)) = pin.file_mode(rel) {
-                        backup_modes.insert(target.clone(), mode);
-                    }
-                    current_skill_bytes.insert(rel.clone(), current);
-                }
+                current_skill_bytes.insert(rel.clone(), current);
             }
         }
     }
@@ -2061,20 +2061,12 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
             // redirect the removal outside the state tree, and an
             // unresolvable pin simply keeps the backup in place (it is
             // only a best-effort cleanup).
-            let removed_backup = match RootFd::open_strict_root(&state_dir)
-                .map_err(|err| io_err(&state_dir, err))?
+            if let crate::anchored::StrictRoot::Pinned(state_pin) =
+                RootFd::open_strict_root(&state_dir).map_err(|err| io_err(&state_dir, err))?
+                && let Ok(rel) = backup_dir.strip_prefix(&state_dir)
             {
-                crate::anchored::StrictRoot::Pinned(state_pin) => {
-                    match backup_dir.strip_prefix(&state_dir) {
-                        Ok(rel) => {
-                            let _ = state_pin.remove_tree(&rel.to_string_lossy());
-                        }
-                        Err(_) => {}
-                    }
-                }
-                _ => {}
-            };
-            let _ = removed_backup;
+                let _ = state_pin.remove_tree(&rel.to_string_lossy());
+            }
             return Err(CliError::Usage(format!(
                 "install failed and changes were rolled back: {exc}"
             )));
@@ -2386,15 +2378,15 @@ fn open_skills_pin(root: &Path) -> Result<Option<RootFd>, CliError> {
 /// absent, mutations refuse (a configured root is always pinned, so this
 /// is unreachable for the roots the installer manages).
 fn pin_for_target<'r>(roots: &'r Roots, target: &Path) -> Option<(&'r RootFd, String)> {
-    if let Some(agent_root) = &roots.agent_root {
-        if let Ok(sub) = target.strip_prefix(&roots.agent_dir) {
-            return Some((agent_root, sub.to_string_lossy().into_owned()));
-        }
+    if let Some(agent_root) = &roots.agent_root
+        && let Ok(sub) = target.strip_prefix(&roots.agent_dir)
+    {
+        return Some((agent_root, sub.to_string_lossy().into_owned()));
     }
-    if let Some(profiles_root) = &roots.profiles_root {
-        if let Ok(sub) = target.strip_prefix(profiles_root.path()) {
-            return Some((profiles_root, sub.to_string_lossy().into_owned()));
-        }
+    if let Some(profiles_root) = &roots.profiles_root
+        && let Ok(sub) = target.strip_prefix(profiles_root.path())
+    {
+        return Some((profiles_root, sub.to_string_lossy().into_owned()));
     }
     None
 }
@@ -2541,10 +2533,10 @@ fn remove_created_dir(
     skills_pin: Option<&RootFd>,
     directory: &Path,
 ) -> Option<std::io::Result<()>> {
-    if let Some(pin) = skills_pin {
-        if let Ok(rel) = directory.strip_prefix(pin.path()) {
-            return Some(pin.try_remove_empty_dir(rel.to_string_lossy().as_ref()));
-        }
+    if let Some(pin) = skills_pin
+        && let Ok(rel) = directory.strip_prefix(pin.path())
+    {
+        return Some(pin.try_remove_empty_dir(rel.to_string_lossy().as_ref()));
     }
     directory
         .strip_prefix(&roots.agent_dir)
