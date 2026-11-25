@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-25
+
 ### Changed
 
 - Allow multiple registry aliases to target the same agent directory, each
