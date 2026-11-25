@@ -1,11 +1,11 @@
-//! Update command: refresh one registry alias to the current source pin.
+//! Update command: refresh one registry install ID to the current source pin.
 //!
 //! Unlike install, update never discovers profiles and never touches other
-//! aliases: it loads the registry entry recorded under the given alias and
-//! re-applies exactly that install (same agent directory, same profile,
-//! same topology) against the current source state.
+//! installs: it loads the registry entry recorded under the given install
+//! ID and re-applies exactly that install (same agent directory, same
+//! profile, same topology) against the current source state.
 //!
-//! Decision path, per alias:
+//! Decision path, per install ID:
 //!
 //! * `--ref` on a local source is rejected (local trees are used exactly
 //!   as they are on disk).
@@ -39,7 +39,7 @@
 //! fallible piece of post-install metadata (the local overlay digest) so a
 //! failure aborts while both the target and the registry are untouched.
 //! It then acquires [`registry::RegistryLock`], revalidates under the lock
-//! that the alias still holds exactly the entry the plan was built from,
+//! that the install ID still holds exactly the entry the plan was built from,
 //! and stages the intended entry as [`registry::InstallState::Partial`]. The lock is
 //! held across [`install::run`] so a concurrent retarget or remove cannot
 //! interleave with the reinstall. Only after the install lands is the
@@ -70,8 +70,8 @@ use crate::topology;
 const CACHE_KEEP_UNREFERENCED: usize = 10;
 
 pub struct UpdateOptions<'a> {
-    /// Stable registry alias to update (never "all profiles").
-    pub alias: &'a str,
+    /// Stable install ID to update (never "all profiles").
+    pub install_id: &'a str,
     /// Ref override (branch, tag, or full 40-hex SHA); GitHub sources only.
     /// When given, the registry's recorded ref is refreshed even if the
     /// resolved commit is unchanged.
@@ -97,27 +97,29 @@ pub struct UpdateOptions<'a> {
     pub dry_run: bool,
 }
 
-/// Update the single registry alias named in `opts`; every human-readable
-/// line lands in `out`, nothing is printed here. Returns the process exit
-/// code: `0` for updated, already-current, and dry-run plans.
+/// Update the single registry install ID named in `opts`; every
+/// human-readable line lands in `out`, nothing is printed here. Returns
+/// the process exit code: `0` for updated, already-current, and dry-run
+/// plans.
 pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliError> {
     let registry_doc = registry::load_registry(opts.state_anchor)?;
-    let entry = registry_doc.get(opts.alias).cloned().ok_or_else(|| {
+    let entry = registry_doc.get(opts.install_id).cloned().ok_or_else(|| {
         CliError::Usage(format!(
-            "unknown alias '{}' (see the registry under {})",
-            opts.alias,
+            "unknown install ID '{}' (see the registry under {})",
+            opts.install_id,
             registry::registry_path(opts.state_anchor)
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|_| "the state root".to_string())
         ))
     })?;
 
-    // The ownership manifest this alias owns: a per-alias manifest when
-    // several aliases share the agent directory, else the legacy default.
+    // The ownership manifest this install ID owns: a per-install-ID
+    // manifest when several install IDs share the agent directory, else
+    // the legacy default.
     let manifest_path = state::manifest_path_for_slot(
         &entry.agent_dir,
         opts.state_anchor,
-        opts.alias,
+        opts.install_id,
         entry.manifest_slot,
     )?;
 
@@ -135,10 +137,10 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
         Some(name) if name == entry.topology => {}
         Some(other) => {
             return Err(CliError::Usage(format!(
-                "refusing to update alias '{}': the ownership manifest in {} \
+                "refusing to update install ID '{}': the ownership manifest in {} \
                  records topology '{other}' but the registry expects '{}'; fix \
-                 the mismatch manually, or remove and reinstall the alias",
-                opts.alias,
+                 the mismatch manually, or remove and reinstall the install",
+                opts.install_id,
                 entry.agent_dir.display(),
                 entry.topology
             )));
@@ -183,7 +185,7 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
         // freshness half of the status is needed for the skip decision;
         // a missing manifest must not skip, even when the pin is still
         // current, because the install below has to recreate it.
-        let current = status::status_for_entry(opts.alias, &entry, opts.state_anchor)?;
+        let current = status::status_for_entry(opts.install_id, &entry, opts.state_anchor)?;
         if !manifest_missing
             && entry.state == registry::InstallState::Installed
             && matches!(current.freshness, Freshness::UpToDate { .. })
@@ -196,8 +198,8 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
                 SourceSpec::Local { path } => path.display().to_string(),
             };
             out.push(format!(
-                "alias '{}' is already up to date ({} at {pin})",
-                opts.alias, entry.topology,
+                "install ID '{}' is already up to date ({} at {pin})",
+                opts.install_id, entry.topology,
             ));
             return Ok(0);
         }
@@ -251,7 +253,7 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
     //   value, or a string that is not valid SemVer — fails closed with
     //   [`CliError::Manifest`]: installs always record strict SemVer here,
     //   so such a manifest was edited or corrupted, and ordering against
-    //   it would be guesswork. The refusal names the alias, the
+    //   it would be guesswork. The refusal names the install ID, the
     //   `topology_version` field, and the offending value, and happens
     //   before any registry or target mutation.
     let manifest = match state::load_manifest_at(&manifest_path, opts.state_anchor) {
@@ -294,10 +296,10 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
                 );
             }
             return Err(CliError::Topology(format!(
-                "refusing to update alias '{}': topology '{}' declares version \
+                "refusing to update install ID '{}': topology '{}' declares version \
                  '{declared}', which is not valid SemVer ({err}); fix the \
                  topology's topology.yml before updating",
-                opts.alias, entry.topology
+                opts.install_id, entry.topology
             )));
         }
     };
@@ -313,11 +315,11 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
             );
         }
         return Err(CliError::Usage(format!(
-            "refusing to update alias '{}': requested version \
+            "refusing to update install ID '{}': requested version \
              '{expected}' but topology '{}' declares version \
              '{declared}' at source '{spec_text}'; pass the declared \
              version or drop --version to accept it",
-            opts.alias, entry.topology
+            opts.install_id, entry.topology
         )));
     }
     if let Some(manifest) = manifest.as_ref()
@@ -336,12 +338,12 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
                         );
                     }
                     return Err(CliError::Manifest(format!(
-                        "refusing to update alias '{}': the installed \
+                        "refusing to update install ID '{}': the installed \
                          manifest in {} records topology_version '{raw}', \
                          which is not valid SemVer ({err}); fix the \
                          installed manifest or remove and reinstall the \
-                         alias to replace the recorded version",
-                        opts.alias,
+                         install to replace the recorded version",
+                        opts.install_id,
                         manifest_path.display(),
                     )));
                 }
@@ -356,12 +358,12 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
                     );
                 }
                 return Err(CliError::Manifest(format!(
-                    "refusing to update alias '{}': the installed manifest \
+                    "refusing to update install ID '{}': the installed manifest \
                      in {} records topology_version as {other}, which must \
                      be a SemVer string; fix the installed manifest or \
-                     remove and reinstall the alias to replace the \
+                     remove and reinstall the install to replace the \
                      recorded version",
-                    opts.alias,
+                    opts.install_id,
                     manifest_path.display(),
                 )));
             }
@@ -376,11 +378,11 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
                 );
             }
             return Err(CliError::Usage(format!(
-                "refusing to update alias '{}': downgrade from installed \
+                "refusing to update install ID '{}': downgrade from installed \
                  version {installed} to source version {declared} at source \
                  '{spec_text}'; reinstall a newer topology, or remove and \
-                 reinstall the alias to replace the installed topology",
-                opts.alias
+                 reinstall the install to replace the installed topology",
+                opts.install_id
             )));
         }
     }
@@ -400,7 +402,7 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
 
     // A replace-mode update swaps the whole active config: refuse before
     // staging a Partial registry entry or taking the lock when the
-    // replacement would overwrite or remove config keys a sibling alias
+    // replacement would overwrite or remove config keys a sibling install
     // owns. install::run repeats the check under the lock before
     // mutating, so ownership recorded in between still fails closed.
     if matches!(opts.config_mode, crate::config_mode::ConfigMode::Replace)
@@ -436,7 +438,7 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
                 dry_run: true,
                 config_mode: opts.config_mode,
                 manifest_path: Some(&manifest_path),
-                alias: Some(opts.alias),
+                install_id: Some(opts.install_id),
                 // Update already asserted the exact version above; the
                 // reinstall only re-records the declared metadata string.
                 expected_version: None,
@@ -453,7 +455,10 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
         if code != 0 {
             return Ok(code);
         }
-        out.push(format!("dry-run: would update alias '{}'", opts.alias));
+        out.push(format!(
+            "dry-run: would update install ID '{}'",
+            opts.install_id
+        ));
         return Ok(0);
     }
 
@@ -482,8 +487,8 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
     // source pin/digest changes.
     intended.installed_at = entry.installed_at.clone();
     intended.state = registry::InstallState::Partial;
-    // The ownership slot is immutable across an update: a per-alias
-    // manifest stays per-alias, the legacy manifest stays legacy.
+    // The ownership slot is immutable across an update: a per-install-ID
+    // manifest stays per-install-ID, the legacy manifest stays legacy.
     intended.manifest_slot = entry.manifest_slot;
 
     // Hold the registry lock across the entire target mutation so a
@@ -504,12 +509,12 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
         }
     };
 
-    // Revalidate under the lock: the alias must still hold exactly the
-    // entry this plan was built from; a disappearance or any divergence
-    // means the alias changed concurrently and must fail clearly instead
-    // of clobbering another target. While the lock is held the registry
-    // cannot change, so the prune below reloads exactly the resulting
-    // state.
+    // Revalidate under the lock: the install ID must still hold exactly
+    // the entry this plan was built from; a disappearance or any
+    // divergence means the install ID changed concurrently and must fail
+    // clearly instead of clobbering another target. While the lock is
+    // held the registry cannot change, so the prune below reloads exactly
+    // the resulting state.
     let mut doc = match registry::load_registry(opts.state_anchor) {
         Ok(doc) => doc,
         Err(err) => {
@@ -522,7 +527,7 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
             return Err(err);
         }
     };
-    let Some(current) = doc.get(opts.alias) else {
+    let Some(current) = doc.get(opts.install_id) else {
         prune_source_cache(
             &source_spec,
             resolved_commit.as_deref(),
@@ -530,9 +535,9 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
             out,
         );
         return Err(CliError::Registry(format!(
-            "registry entry for alias '{}' disappeared during the update; \
+            "registry entry for install ID '{}' disappeared during the update; \
              refusing to recreate it implicitly",
-            opts.alias
+            opts.install_id
         )));
     };
     if *current != entry {
@@ -548,9 +553,9 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
             out,
         );
         return Err(CliError::Registry(format!(
-            "registry entry for alias '{}' changed concurrently (now {} -> {}, \
+            "registry entry for install ID '{}' changed concurrently (now {} -> {}, \
              state {state_text}); refusing to overwrite it",
-            opts.alias,
+            opts.install_id,
             current.agent_dir.display(),
             current.topology,
         )));
@@ -564,7 +569,7 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
     // lands.
     let mut staged = entry.clone();
     staged.state = registry::InstallState::Partial;
-    if let Err(err) = doc.insert(opts.alias, staged) {
+    if let Err(err) = doc.insert(opts.install_id, staged) {
         prune_source_cache(
             &source_spec,
             resolved_commit.as_deref(),
@@ -594,7 +599,7 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
             dry_run: false,
             config_mode: opts.config_mode,
             manifest_path: Some(&manifest_path),
-            alias: Some(opts.alias),
+            install_id: Some(opts.install_id),
             // Update already asserted the exact version above; the
             // reinstall only re-records the declared metadata string.
             expected_version: None,
@@ -625,10 +630,10 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
         // authority on what actually exists. The lock drops when this
         // returns, after the cache prune below.
         out.push(format!(
-            "warning: update of alias '{}' did not complete; the registry now \
+            "warning: update of install ID '{}' did not complete; the registry now \
              records it as 'partial' (the ownership manifest is authoritative); \
              rerun the update to finish",
-            opts.alias
+            opts.install_id
         ));
         prune_source_cache(
             &source_spec,
@@ -646,7 +651,7 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
     // staged Partial entry remains, which is still truthful, and the next
     // run reconciles or reinstalls.
     intended.state = registry::InstallState::Installed;
-    if let Err(err) = doc.insert(opts.alias, intended) {
+    if let Err(err) = doc.insert(opts.install_id, intended) {
         prune_source_cache(
             &source_spec,
             resolved_commit.as_deref(),
@@ -669,7 +674,7 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
     // lock) so the freshly resolved pin is retained by the prune. The
     // filter must use the committed `source_spec`, not the pre-update
     // `entry.source`: after a source switch the registry's pins for the
-    // new source (including this alias's fresh commit) are what the
+    // new source (including this install's fresh commit) are what the
     // prune below must keep.
     let mut referenced = BTreeSet::new();
     if let TopologySource::GitHub { .. } = source_spec {
@@ -683,8 +688,8 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
     drop(lock);
 
     out.push(format!(
-        "updated alias '{}' ({} at {})",
-        opts.alias,
+        "updated install ID '{}' ({} at {})",
+        opts.install_id,
         entry.topology,
         entry.agent_dir.display()
     ));
@@ -719,7 +724,7 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
 /// cache never retains more than `CACHE_KEEP_UNREFERENCED` checkouts
 /// beyond those the registry references. When the registry cannot be
 /// reloaded the prune is skipped entirely rather than risk deleting a
-/// commit some other alias still references. Every failure is a warning
+/// commit some other install still references. Every failure is a warning
 /// line in `out`, never a change to the command's result; local sources
 /// and dry-run checkouts never reach here.
 fn prune_source_cache(

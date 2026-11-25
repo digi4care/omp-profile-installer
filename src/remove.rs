@@ -39,13 +39,13 @@ pub struct RemoveOptions<'a> {
     pub agent_dir: Option<&'a str>,
     pub skills_dir: Option<&'a str>,
     pub dry_run: bool,
-    /// Ownership manifest this removal owns (a per-alias manifest when
-    /// several aliases share the agent directory). `None` uses the
-    /// legacy default `manifest.json`.
+    /// Ownership manifest this removal owns (a per-install-ID manifest
+    /// when several install IDs share the agent directory). `None` uses
+    /// the legacy default `manifest.json`.
     pub manifest_path: Option<&'a Path>,
-    /// Alias being removed, when invoked through one. Scopes recovery
-    /// markers so a sibling alias's rollback snapshot is never cleared.
-    pub alias: Option<&'a str>,
+    /// Install ID being removed, when invoked through one. Scopes recovery
+    /// markers so a sibling install's rollback snapshot is never cleared.
+    pub install_id: Option<&'a str>,
 }
 
 type PathKey = Vec<String>;
@@ -184,8 +184,9 @@ fn valid_skills_root(raw: &str) -> bool {
 pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError> {
     let state_anchor = opts.state_anchor;
     let agent_dir = resolve_agent_dir(opts.agent_dir)?;
-    // The ownership manifest this removal owns: a per-alias manifest when
-    // several aliases share the agent directory, else the legacy default.
+    // The ownership manifest this removal owns: a per-install-ID manifest
+    // when several install IDs share the agent directory, else the legacy
+    // default.
     let manifest_path = match opts.manifest_path {
         Some(path) => path.to_path_buf(),
         None => state::manifest_path(&agent_dir, state_anchor)?,
@@ -1219,7 +1220,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
             ),
             &snapshot_dir,
             &report,
-            opts.alias,
+            opts.install_id,
         ));
     }
 
@@ -1457,7 +1458,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
                 ),
                 &snapshot_dir,
                 &report,
-                opts.alias,
+                opts.install_id,
             ));
         }
         for line in &conflicts {
@@ -1516,7 +1517,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
             ),
             &snapshot_dir,
             &report,
-            opts.alias,
+            opts.install_id,
         ));
     }
     out.push(format!(
@@ -1541,7 +1542,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
     if let Err(exc) = registry::clear_recovery_snapshots(
         &agent_dir,
         state_anchor,
-        opts.alias,
+        opts.install_id,
         owns_legacy_manifest,
     ) {
         out.push(format!("warning: could not clear recovery markers: {exc}"));

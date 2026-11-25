@@ -491,10 +491,11 @@ pub fn with_registry<T>(
 /// The marker is a private state file (atomic temp-file + rename,
 /// owner-only permissions) named [`RECOVERY_MARKER`] inside the snapshot
 /// directory, written descriptor-relative below a pinned snapshot-root
-/// descriptor. When the failing operation belongs to a registry alias the
-/// marker content records it, so a successful run of a *different* alias
-/// sharing the agent directory never clears this alias's only rollback
-/// data; an alias-less operation writes the legacy untagged content.
+/// descriptor. When the failing operation belongs to a registry install
+/// ID the marker content records it, so a successful run of a *different*
+/// install ID sharing the agent directory never clears this install ID's
+/// only rollback data; an install-ID-less operation writes the legacy
+/// untagged content.
 pub fn mark_recovery_snapshot(snapshot_dir: &Path, alias: Option<&str>) -> Result<(), CliError> {
     let marker = snapshot_dir.join(RECOVERY_MARKER);
     let root =
@@ -789,7 +790,7 @@ pub fn validate_alias(alias: &str) -> Result<(), CliError> {
         || alias.len() > 64
     {
         return Err(fail(format!(
-            "invalid alias '{alias}': must match [a-z0-9][a-z0-9-]{{0,63}}"
+            "invalid install ID '{alias}': must match [a-z0-9][a-z0-9-]{{0,63}}"
         )));
     }
     Ok(())

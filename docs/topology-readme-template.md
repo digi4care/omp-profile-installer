@@ -68,7 +68,7 @@ This topology follows [Semantic Versioning](https://semver.org): every change
 to its payload or metadata bumps `version` in `topology.yml` and is recorded
 in [`CHANGELOG.md`](CHANGELOG.md) (Keep-a-Changelog style). These versions
 are independent of the `omp-topology` CLI's own releases. Use
-`omp-topology update --alias <alias> --version X.Y.Z` to assert the exact
+`omp-topology update --install-id <install-id> --version X.Y.Z` to assert the exact
 version an update installs.
 
 ## Limits

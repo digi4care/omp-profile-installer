@@ -157,14 +157,14 @@ pub fn manifest_path(agent_dir: &Path, repo_root: &Path) -> Result<PathBuf, CliE
 pub enum ManifestSlot {
     /// The legacy per-agent `manifest.json`.
     Legacy,
-    /// The alias's own `manifests/<alias>.json`.
+    /// The install ID's own `manifests/<install-id>.json`.
     PerAlias,
 }
 
-/// The per-alias ownership manifest path for `alias`:
-/// `<agent-state-dir>/manifests/<alias>.json`. The registry alias
-/// grammar (`registry::validate_alias`: `[a-z0-9][a-z0-9-]{0,63}`) makes
-/// the file name a safe single path component.
+/// The per-install-ID ownership manifest path for `alias` (the install
+/// ID): `<agent-state-dir>/manifests/<alias>.json`. The registry install
+/// ID grammar (`registry::validate_alias`: `[a-z0-9][a-z0-9-]{0,63}`)
+/// makes the file name a safe single path component.
 pub fn alias_manifest_path(
     agent_dir: &Path,
     repo_root: &Path,
@@ -175,7 +175,7 @@ pub fn alias_manifest_path(
         .join(format!("{alias}.json")))
 }
 
-/// The ownership-manifest path an alias owns under `slot`.
+/// The ownership-manifest path an install ID owns under `slot`.
 pub fn manifest_path_for_slot(
     agent_dir: &Path,
     repo_root: &Path,

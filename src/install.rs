@@ -74,14 +74,14 @@ pub struct InstallOptions<'a> {
     /// Config handling for this run only; config modes are never
     /// remembered between commands.
     pub config_mode: ConfigMode,
-    /// Ownership manifest this install owns (a per-alias manifest when
-    /// several aliases share the agent directory). `None` uses the
-    /// legacy default `manifest.json`.
+    /// Ownership manifest this install owns (a per-install-ID manifest
+    /// when several install IDs share the agent directory). `None` uses
+    /// the legacy default `manifest.json`.
     pub manifest_path: Option<&'a Path>,
-    /// Alias performing the install, when invoked through one. Scopes
-    /// recovery markers so a sibling alias's rollback snapshot is never
+    /// Install ID performing the install, when invoked through one. Scopes
+    /// recovery markers so a sibling install's rollback snapshot is never
     /// cleared.
-    pub alias: Option<&'a str>,
+    pub install_id: Option<&'a str>,
     /// Exact topology metadata version assertion: when given, the
     /// resolved topology's declared `version` must equal this version
     /// exactly (never a range, never compared against a recorded
@@ -178,9 +178,9 @@ fn refuse_replace_over_sibling_ownership(
     if let Some((leaf, owner)) = cross_alias.config_installed.iter().next() {
         return Err(CliError::Usage(format!(
             "refusing to install: config key '{}' is already managed by \
-             alias '{owner}' for {}; --config-replace replaces the whole \
+             install ID '{owner}' for {}; --config-replace replaces the whole \
              active config and would remove it (use --config-merge to share \
-             the config, or remove that alias first)",
+             the config, or remove that install first)",
             leaf.join("."),
             agent_dir.display()
         )));
@@ -444,7 +444,7 @@ pub fn preflight_target_links(
         if let Some(owner) = cross_alias.files.get(rel.as_str()) {
             note_collision_owner(&mut collision_owners, owner);
             collisions.push(format!(
-                "{rel} already exists and is managed by alias '{owner}'; \
+                "{rel} already exists and is managed by install ID '{owner}'; \
                  refusing to overwrite it"
             ));
             continue;
@@ -503,7 +503,7 @@ pub fn preflight_target_links(
                 note_collision_owner(&mut collision_owners, owner);
                 collisions.push(format!(
                     "{rel} already exists under skills root '{}' and is \
-                     managed by alias '{owner}'; refusing to overwrite it",
+                     managed by install ID '{owner}'; refusing to overwrite it",
                     root.display()
                 ));
                 continue;
@@ -577,8 +577,9 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     let state_anchor = opts.state_anchor;
     let topology_dir = topology::find_topology(topology_root, opts.topology, true)?;
     let agent_dir = resolve_agent_dir(opts.agent_dir)?;
-    // The ownership manifest this install owns: a per-alias manifest when
-    // several aliases share the agent directory, else the legacy default.
+    // The ownership manifest this install owns: a per-install-ID
+    // manifest when several install IDs share the agent directory, else
+    // the legacy default.
     let manifest_path = match opts.manifest_path {
         Some(path) => path.to_path_buf(),
         None => state::manifest_path(&agent_dir, state_anchor)?,
@@ -639,8 +640,8 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     {
         let installed = topology::manifest_topology(manifest).unwrap_or("unknown");
         return Err(CliError::Usage(format!(
-            "refusing to install: this alias's ownership manifest for {} \
-             records topology '{installed}'; one topology per alias \
+            "refusing to install: this install ID's ownership manifest for {} \
+             records topology '{installed}'; one topology per install ID \
              (remove it first)",
             agent_dir.display()
         )));
@@ -929,7 +930,7 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
             if let Some(owner) = cross_alias.files.get(rel) {
                 note_collision_owner(&mut collision_owners, owner);
                 collisions.push(format!(
-                    "{rel} already exists and is managed by alias '{owner}'; \
+                    "{rel} already exists and is managed by install ID '{owner}'; \
                      refusing to overwrite it"
                 ));
             } else {
@@ -1020,7 +1021,7 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
                     note_collision_owner(&mut collision_owners, owner);
                     collisions.push(format!(
                         "{rel} already exists under skills root '{}' and is \
-                         managed by alias '{owner}'; refusing to overwrite it",
+                         managed by install ID '{owner}'; refusing to overwrite it",
                         root.display()
                     ));
                 } else {
@@ -1193,7 +1194,7 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     {
         return Err(CliError::Usage(format!(
             "refusing to install: config key '{}' is already managed by \
-             alias '{owner}' for {}; refusing to overwrite it",
+             install ID '{owner}' for {}; refusing to overwrite it",
             leaf.join("."),
             agent_dir.display()
         )));
@@ -1233,8 +1234,8 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
             // bookkeeping, so a sibling-owned candidate always fails closed.
             if let Some(owner) = &cross_alias.candidate_owner {
                 return Err(CliError::Usage(format!(
-                    "refusing to install: '{}' is already managed by alias \
-                     '{owner}' for {}; remove that candidate (or that alias) \
+                    "refusing to install: '{}' is already managed by install ID \
+                     '{owner}' for {}; remove that candidate (or that install) \
                      first",
                     candidate_path.display(),
                     agent_dir.display()
@@ -2333,7 +2334,7 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
             unrestored.join("\n  - "),
             backup_dir.display()
         );
-        if let Err(marker_exc) = registry::mark_recovery_snapshot(&backup_dir, opts.alias) {
+        if let Err(marker_exc) = registry::mark_recovery_snapshot(&backup_dir, opts.install_id) {
             message.push_str(&format!(
                 "\nwarning: could not mark the retained snapshot as \
                  recovery-required; ordinary retention may delete it: \
@@ -2392,7 +2393,7 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     if let Err(exc) = registry::clear_recovery_snapshots(
         &agent_dir,
         state_anchor,
-        opts.alias,
+        opts.install_id,
         owns_legacy_manifest,
     ) {
         out.push(format!("warning: could not clear recovery markers: {exc}"));
@@ -3330,7 +3331,7 @@ mod tests {
             dry_run: false,
             config_mode: ConfigMode::Replace,
             manifest_path: None,
-            alias: None,
+            install_id: None,
             expected_version: None,
         };
         let mut output = Vec::new();

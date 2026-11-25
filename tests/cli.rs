@@ -44,9 +44,11 @@ impl TestDir {
         let bin_dir = self.0.join("bin");
         fs::create_dir_all(&bin_dir).expect("failed to create fake PATH");
         let fake_omp = bin_dir.join("omp");
+        let invocation_log = self.0.join("omp-invocations.log");
         fs::write(
             &fake_omp,
             "#!/bin/sh\n\
+             printf '%s\\n' \"$*\" >> \"$OMP_TEST_OMP_LOG\"\n\
              if [ \"$1\" = \"--profile\" ]; then shift 2; fi\n\
              if [ \"$1\" != \"config\" ] || [ \"$2\" != \"path\" ]; then exit 64; fi\n\
              if [ \"$OMP_TEST_CREATE_DIR\" = 1 ]; then mkdir -p \"$OMP_TEST_AGENT_DIR\" || exit 1; fi\n\
@@ -64,7 +66,8 @@ impl TestDir {
         command
             .env("PATH", path)
             .env("OMP_TEST_AGENT_DIR", agent_dir)
-            .env("OMP_TEST_CREATE_DIR", if create_dir { "1" } else { "0" });
+            .env("OMP_TEST_CREATE_DIR", if create_dir { "1" } else { "0" })
+            .env("OMP_TEST_OMP_LOG", invocation_log);
     }
 }
 
@@ -90,7 +93,7 @@ fn help_shows_description_and_version_option() {
     );
 }
 #[test]
-fn cli_guidance_update_rejects_topology_option_before_state_or_target_access() {
+fn cli_rejects_legacy_update_alias_before_state_or_target_access() {
     let temp = TestDir::new();
     let default_agent_dir = temp.0.join("default-agent");
     let blocked_state_home = temp.0.join("blocked-state-home");
@@ -98,13 +101,7 @@ fn cli_guidance_update_rejects_topology_option_before_state_or_target_access() {
     fs::write(&blocked_state_home, state_sentinel).expect("failed to block state home");
 
     let mut command = temp.cli_command(Path::new(env!("CARGO_MANIFEST_DIR")));
-    command.args([
-        "update",
-        "--alias",
-        "omp-dps",
-        "--topology",
-        "digital-product-studio",
-    ]);
+    command.args(["update", "--alias", "omp-dps"]);
     command.env("XDG_STATE_HOME", &blocked_state_home);
     temp.configure_fake_omp(&mut command, &default_agent_dir, true);
 
@@ -112,14 +109,15 @@ fn cli_guidance_update_rejects_topology_option_before_state_or_target_access() {
     assert_eq!(
         output.status.code(),
         Some(2),
-        "invalid update option did not return clap exit 2: {output:?}"
+        "legacy update option did not return clap exit 2: {output:?}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Usage:")
             && stderr.contains("omp-topology update")
-            && stderr.contains("--alias <ALIAS>"),
-        "invalid update option did not show required-alias usage:\n{stderr}"
+            && stderr.contains("unexpected argument")
+            && stderr.contains("--alias"),
+        "removed update --alias was not rejected as an unknown clap argument:\n{stderr}"
     );
     assert_eq!(
         fs::read(&blocked_state_home).expect("blocked state sentinel disappeared"),
@@ -133,14 +131,16 @@ fn cli_guidance_update_rejects_topology_option_before_state_or_target_access() {
 }
 
 #[test]
-fn cli_guidance_install_help_explains_alias_and_profile_independence() {
+fn cli_guidance_install_help_documents_shell_alias_profile_requirement() {
     let output = run_cli(&["install", "--help"]);
     assert!(output.status.success(), "install --help failed: {output:?}");
     let stdout = String::from_utf8(output.stdout).expect("help output was not UTF-8");
     let lower = stdout.to_ascii_lowercase();
     assert!(
-        lower.contains("alias does not select a profile"),
-        "install help did not explain that an alias does not select a profile:\n{stdout}"
+        lower.contains("requires --profile")
+            && lower.contains("shell alias is independent of the registry install id")
+            && lower.contains("never influences install selection"),
+        "install help did not document the shell-alias requirements and independent install ID:\n{stdout}"
     );
     assert!(
         stdout.contains("--profile") && stdout.contains("--agent-dir"),
@@ -176,19 +176,29 @@ fn unknown_argument_returns_clap_usage_error() {
 }
 
 #[test]
-fn install_dry_run_does_not_create_missing_profile_directory() {
+fn install_dry_run_reports_shell_alias_without_creating_it() {
     let temp = TestDir::new();
-    let profile_agent = temp.0.join("home/.omp/profiles/regression/agent");
+    let profile_agent = temp.0.join("home/.omp/profiles/demo/agent");
+    let home = temp.0.join("home");
+    let xdg_config = temp.0.join("xdg-config");
+    fs::create_dir_all(&home).expect("failed to create isolated HOME");
+    fs::create_dir_all(&xdg_config).expect("failed to create isolated XDG_CONFIG_HOME");
+    fs::write(home.join(".bashrc"), b"# existing shell configuration\n")
+        .expect("failed to seed shell configuration");
+    let home_before = cli_file_snapshot(&home);
+    let xdg_config_before = cli_file_snapshot(&xdg_config);
     let mut command = temp.cli_command(Path::new(env!("CARGO_MANIFEST_DIR")));
     command.args([
         "install",
         "--topology",
         "digital-product-studio",
         "--profile",
-        "regression",
+        "demo",
+        "--alias",
+        "demo-alias",
         "--dry-run",
     ]);
-    temp.configure_fake_omp(&mut command, &profile_agent, true);
+    temp.configure_fake_omp(&mut command, &profile_agent, false);
 
     let output = command.output().expect("failed to execute omp-topology");
     assert!(
@@ -196,6 +206,22 @@ fn install_dry_run_does_not_create_missing_profile_directory() {
         "install --dry-run failed: {output:?}"
     );
     let stdout = String::from_utf8(output.stdout).expect("CLI output was not UTF-8");
+    let invocation_log = fs::read_to_string(temp.0.join("omp-invocations.log"))
+        .expect("fake OMP invocation log is missing");
+    assert_eq!(
+        invocation_log, "--profile demo config path\n",
+        "dry-run invoked OMP shell-alias creation"
+    );
+    assert_eq!(
+        cli_file_snapshot(&home),
+        home_before,
+        "install --dry-run mutated HOME shell configuration"
+    );
+    assert_eq!(
+        cli_file_snapshot(&xdg_config),
+        xdg_config_before,
+        "install --dry-run mutated XDG shell configuration"
+    );
     assert!(
         stdout.contains(&profile_agent.display().to_string()),
         "dry-run did not resolve the requested profile target: {stdout}"
@@ -204,6 +230,42 @@ fn install_dry_run_does_not_create_missing_profile_directory() {
         !profile_agent.exists(),
         "install --dry-run created the missing profile directory"
     );
+    assert!(
+        !temp.0.join("state").exists(),
+        "install --dry-run created installer state"
+    );
+    assert!(
+        stdout.contains("Would create OMP shell alias 'demo-alias' for profile 'demo'"),
+        "dry-run omitted the planned OMP shell alias: {stdout}"
+    );
+}
+
+fn cli_file_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn visit(root: &Path, directory: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in fs::read_dir(directory).expect("failed to read snapshot directory") {
+            let entry = entry.expect("failed to read snapshot entry");
+            let path = entry.path();
+            if entry
+                .file_type()
+                .expect("failed to inspect snapshot entry")
+                .is_dir()
+            {
+                visit(root, &path, files);
+            } else {
+                files.push((
+                    path.strip_prefix(root)
+                        .expect("snapshot path escaped its root")
+                        .to_path_buf(),
+                    fs::read(path).expect("failed to read snapshot file"),
+                ));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(root, root, &mut files);
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
 }
 
 #[test]

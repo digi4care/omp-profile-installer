@@ -34,8 +34,8 @@ pub const DEFAULT_PROFILE: &str = "default";
 /// One registry-managed install attached to a discovered agent directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedInstall {
-    /// Stable registry alias for the install.
-    pub alias: String,
+    /// Stable registry install ID for the install.
+    pub install_id: String,
     /// Installed topology name.
     pub topology: String,
     /// Where the topology source came from.
@@ -57,7 +57,7 @@ pub struct DiscoveredProfile {
     /// `true` when the directory currently exists; registry-only entries
     /// whose custom agent dir vanished list with `false`.
     pub exists: bool,
-    /// Registry installs targeting this directory, sorted by alias.
+    /// Registry installs targeting this directory, sorted by install ID.
     pub managed: Vec<ManagedInstall>,
 }
 
@@ -107,10 +107,10 @@ fn merge_registry(
     for (index, profile) in discovered.iter().enumerate() {
         by_agent_dir.insert(profile.agent_dir.clone(), index);
     }
-    for (alias, entry) in &registry.aliases {
+    for (install_id, entry) in &registry.aliases {
         let agent_dir = fsx::resolve_loose(&entry.agent_dir);
         let install = ManagedInstall {
-            alias: alias.clone(),
+            install_id: install_id.clone(),
             topology: entry.topology.clone(),
             source: entry.source.clone(),
         };
@@ -127,7 +127,9 @@ fn merge_registry(
         }
     }
     for profile in &mut discovered {
-        profile.managed.sort_by(|a, b| a.alias.cmp(&b.alias));
+        profile
+            .managed
+            .sort_by(|a, b| a.install_id.cmp(&b.install_id));
     }
     discovered.sort_by(|a, b| {
         a.name
@@ -146,7 +148,7 @@ fn merge_registry(
 /// `profiles` root, or `agent` dir is skipped, never followed or
 /// traversed. Registry-managed agent dirs not found in that tree are
 /// appended with their recorded profile name (if any) and managed
-/// alias/topology/source metadata. Entries sort by profile name (unnamed
+/// install-ID/topology/source metadata. Entries sort by profile name (unnamed
 /// entries first), then by agent directory. I/O failures other than
 /// `NotFound` are actionable errors naming the offending path.
 ///
@@ -268,6 +270,34 @@ fn omp_config_path(profile: Option<&str>) -> Result<PathBuf, CliError> {
              printed no path; pass --agent-dir PATH explicitly"
         ))),
     }
+}
+
+/// Run `omp --profile NAME --alias ALIAS` so the real omp creates the
+/// shell alias inside its own profile, after a topology install has been
+/// registered. No shell is involved: the invocation is a plain argv
+/// array, matching [`omp_config_path`]. stdout/stderr are captured and
+/// never leak into installer output (in particular not into JSON mode);
+/// a spawn failure or non-zero exit is a `CliError` naming the exact
+/// command for manual recovery. The caller decides whether a failed
+/// alias creation rolls anything back — this helper never does.
+pub fn create_profile_alias(profile: &str, alias: &str) -> Result<(), CliError> {
+    let invocation = format!("omp --profile {profile} --alias {alias}");
+    let output = std::process::Command::new("omp")
+        .args(["--profile", profile, "--alias", alias])
+        .output()
+        .map_err(|err| {
+            CliError::Usage(format!(
+                "could not create the shell alias via '{invocation}' ({err})"
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(CliError::Usage(format!(
+            "could not create the shell alias via '{invocation}' \
+             (exited {})",
+            output.status
+        )));
+    }
+    Ok(())
 }
 
 /// The conventional agent directory of a profile under `$HOME/.omp`:
