@@ -27,5 +27,5 @@ installable topology's name, version, and description straight from
 its manifest, and reports none when no topology payload is present.
 
 Install instructions are in the
-[root README](../README.md#quick-start). To propose a topology, see
+[root README](../README.md#-quick-start). To propose a topology, see
 [CONTRIBUTING.md](../CONTRIBUTING.md).

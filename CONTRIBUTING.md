@@ -56,7 +56,11 @@ installer-compatible and understandable to humans and agents:
      # topology's config is published as config.yml.new (created as the
      # active config.yml only when none exists). Add --config-merge or
      # --config-replace here if the dry-run should exercise those modes.
-     cargo run -- install -t <name> --dry-run --agent-dir "$(mktemp -d)"
+     # The /agent basename matters: the default registry alias is the
+     # lowercased basename of the agent directory and must match
+     # [a-z0-9][a-z0-9-]{0,63}, which a bare mktemp basename (dots,
+     # uppercase letters) violates.
+     cargo run -- install -t <name> --dry-run --agent-dir "$(mktemp -d)/agent"
      ```
 
    - Confirm `cargo run -- list` shows the topology with the expected
@@ -74,7 +78,29 @@ installer-compatible and understandable to humans and agents:
   ```
 
   The full local gate is `cargo test --locked` plus `scripts/rust-gates.sh`
-  (the same entry point CI runs).
+  (the same entry point the Rust gates workflow runs).
+
+- Continuous integration runs one workflow per input domain on every pull
+  request, each gated to the files it verifies:
+
+  - `.github/workflows/rust-gates.yml` (check `fmt, clippy, tests`) runs
+    `scripts/rust-gates.sh` only when the PR changes Rust inputs (Rust
+    sources, Cargo manifests or lockfile, the toolchain file, `.cargo/`,
+    or the gate script/workflow itself). On a topology-only PR the job
+    succeeds without running the Rust gates.
+  - `.github/workflows/topology.yml` (check `topology`) verifies
+    `topologies/<slug>/` changes only: it fails on topology payload files
+    without a valid manifest, confirms `cargo run --locked -- list --json`
+    shows each changed topology's exact name/version/description from its
+    `topology.yml`, runs `cargo test --locked --test installer` once, and
+    dry-runs each changed topology into a fresh temporary agent directory.
+    On a PR with no topology change the job succeeds explicitly without
+    running topology checks.
+
+  CI never replaces local verification: run the applicable checks locally
+  before opening the PR and report them in the PR description. Both checks
+  must pass before merging; a job that skipped its domain gates is not
+  evidence for that domain.
 
 - For topology or prompt changes, inspect the resulting files and compare them with the source topology or approved requirements as applicable. Do not claim tests, installation, or runtime behavior were verified unless those checks were actually run.
 - In reports and documentation, distinguish verified results from implementation-reported claims, assumptions, pending work, and unverified criteria. A passing narrow check proves only the behavior it exercised.

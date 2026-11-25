@@ -281,7 +281,7 @@ fn home_dir() -> Option<std::ffi::OsString> {
 
 #[cfg(test)]
 thread_local! {
-    static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = std::cell::RefCell::new(None);
+    static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
