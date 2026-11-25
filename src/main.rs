@@ -1167,6 +1167,15 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
         target.agent_dir.display()
     ));
 
+    // Bounded cache cleanup after the registry mutation, per GitHub
+    // source involved in the install, retaining every commit still
+    // referenced by the post-insert registry. Run this before optional
+    // shell-alias delegation so an OMP alias failure cannot skip cleanup;
+    // a prune failure is a warning, never an install failure.
+    for source in sources_to_prune {
+        prune_install_source(&anchor, &source, &BTreeSet::new(), &mut out);
+    }
+
     // The topology is installed and the registry commit succeeded, so
     // the shell alias is handed to the real omp — it owns its own rc-file
     // syntax, which this installer never writes. Only an explicit
@@ -1193,13 +1202,6 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
         )));
     }
 
-    // Bounded cache cleanup after the registry mutation, per GitHub
-    // source involved in the install, retaining every commit still
-    // referenced by the post-insert registry; a prune failure is a
-    // warning, never an install failure.
-    for source in sources_to_prune {
-        prune_install_source(&anchor, &source, &BTreeSet::new(), &mut out);
-    }
     finish("install", args.json, out, 0)
 }
 
