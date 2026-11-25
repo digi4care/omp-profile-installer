@@ -97,7 +97,7 @@ fn version_prints_exact_package_version() {
 
     let stdout = String::from_utf8(output.stdout).expect("--version output was not UTF-8");
     assert!(
-        stdout == "omp-topology 0.2.5" || stdout == "omp-topology 0.2.5\n",
+        stdout.trim_end() == concat!("omp-topology ", env!("CARGO_PKG_VERSION")),
         "unexpected --version output: {stdout:?}"
     );
 }
