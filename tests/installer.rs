@@ -17,8 +17,14 @@ impl TestDir {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is before UNIX epoch")
             .as_nanos();
+        Self::create_with_timestamp(unique)
+    }
+
+    fn create_with_timestamp(unique: u128) -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "omp-topology-installer-{}-{unique}",
+            "omp-topology-installer-{}-{unique}-{id}",
             std::process::id()
         ));
         fs::create_dir(&path).expect("failed to create isolated test directory");
@@ -33,6 +39,52 @@ impl TestDir {
 impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn test_dir_creation_is_collision_resistant_under_concurrency() {
+    const THREADS: usize = 16;
+    let start = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+    let workers = (0..THREADS)
+        .map(|_| {
+            let start = std::sync::Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                TestDir::create_with_timestamp(42)
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = workers
+        .into_iter()
+        .map(|worker| worker.join())
+        .collect::<Vec<_>>();
+
+    assert!(
+        results.iter().all(Result::is_ok),
+        "concurrent TestDir creation failed"
+    );
+    let dirs = results.into_iter().map(Result::unwrap).collect::<Vec<_>>();
+    let paths = dirs.iter().map(|dir| dir.0.clone()).collect::<Vec<_>>();
+    for (index, path) in paths.iter().enumerate() {
+        assert!(
+            path.is_dir(),
+            "created test directory is missing: {}",
+            path.display()
+        );
+        assert!(
+            !paths[..index].contains(path),
+            "concurrent TestDir instances share a path: {}",
+            path.display()
+        );
+    }
+    drop(dirs);
+    for path in paths {
+        assert!(
+            !path.exists(),
+            "TestDir did not clean up: {}",
+            path.display()
+        );
     }
 }
 

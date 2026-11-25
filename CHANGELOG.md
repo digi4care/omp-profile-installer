@@ -6,16 +6,12 @@ All notable changes to this project are documented here.
 
 ### Added
 
-- Target the agent directory of a topology's metadata `profile` (resolved
-  via `omp --profile NAME config path` as an argument vector) for both
-  `install` and `remove`; topologies without a metadata profile keep the
-  legacy `omp config path` behavior.
-- Add `--profile NAME` to `install` and `remove` to override the metadata
-  profile; it is mutually exclusive with `--agent-dir`, which remains an
-  explicit path override that also overrides the metadata profile.
-- When the topology source was deleted after installing, `remove` falls
-  back to the legacy active-profile directory instead of requiring the
-  metadata profile.
+- Add `--profile NAME` to `install`, `remove`, and `status` for explicit
+  profile targeting, resolved via `omp --profile NAME config path` as an
+  argument vector. It is mutually exclusive with `--agent-dir`; without either
+  option the ambient profile from `omp config path` remains the target.
+- `remove` falls back to the legacy active-profile directory when the topology
+  source was deleted after installing.
 - Assign `digital-product-studio` its own OMP profile and bump the topology to
   `2.0.0`. The previous default-profile installation is retained until the
   operator verifies the new profile and explicitly removes the old overlay.
