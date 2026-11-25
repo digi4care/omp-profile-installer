@@ -1,6 +1,6 @@
 [package]
 name = "omp-topology"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 description = "Install and manage OMP topology profiles"
 license = "Apache-2.0"

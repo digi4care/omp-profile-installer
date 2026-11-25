@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-11-25
+
 ### Fixed
 
 - Scope cross-alias skill ownership by the recorded skills root, so removing
