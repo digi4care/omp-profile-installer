@@ -48,6 +48,9 @@ build/
 .DS_Store
 Thumbs.db
 
+# Local PI session state
+/.pi/
+
 # Local external-project symlink
 /AI-Story
 

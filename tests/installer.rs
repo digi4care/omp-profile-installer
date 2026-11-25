@@ -97,6 +97,8 @@ fn cli_command(temp: &TestDir, cwd: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_omp-topology"));
     command
         .current_dir(cwd)
+        .env_remove("OMP_HOME")
+        .env_remove("OMP_PROFILE")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", xdg_config)
         .env("XDG_STATE_HOME", temp.state_home());
@@ -1088,8 +1090,7 @@ fn install_dry_run_accepts_legacy_config_file_existed_boolean() {
     let agent_dir = temp.0.join("agent");
     fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
     let config = agent_dir.join("config.yml");
-    fs::write(&config, b"task:\n  eager: never\n  local_setting: keep\n")
-        .expect("failed to seed config.yml");
+    fs::write(&config, b"task:\n  eager: always\n").expect("failed to seed config.yml");
 
     let installed = run_cli(
         &temp,
@@ -1103,13 +1104,27 @@ fn install_dry_run_accepts_legacy_config_file_existed_boolean() {
         serde_json::from_slice(&fs::read(&manifest).expect("ownership manifest is missing"))
             .expect("ownership manifest is not valid JSON");
     assert_eq!(ownership["topology_version"], "2.0.1");
-    assert!(
-        ownership["config"]["prior"].is_object() && ownership["config"]["installed"].is_object(),
-        "fixture lacks valid current config ownership"
+    assert_eq!(
+        ownership["config"]["prior"]["[\"task\", \"eager\"]"]["value"], "always",
+        "fixture lacks valid prior config ownership"
+    );
+    assert_eq!(
+        ownership["config"]["installed"]["[\"task\", \"eager\"]"]["value"], "always",
+        "fixture lacks valid installed config ownership"
     );
 
-    let edited_config = b"task:\n  eager: never\n  local_setting: keep\n";
-    fs::write(&config, edited_config).expect("failed to edit config.yml");
+    let installed_config =
+        fs::read_to_string(&config).expect("failed to read installed config.yml");
+    assert!(
+        installed_config.contains("eager: always"),
+        "initial install did not merge the topology-owned key:\n{installed_config}"
+    );
+    let edited_config = installed_config.replacen("eager: always", "eager: locally-edited", 1);
+    assert_ne!(
+        edited_config, installed_config,
+        "failed to create an edited config fixture"
+    );
+    fs::write(&config, edited_config.as_bytes()).expect("failed to edit config.yml");
 
     // Match the legacy single-root manifest shape while retaining the
     // complete current file ownership inventory from the setup install.
@@ -1151,7 +1166,7 @@ fn install_dry_run_accepts_legacy_config_file_existed_boolean() {
     assert_success(&dry_run);
     assert_eq!(
         fs::read(&config).expect("config.yml disappeared during dry-run"),
-        edited_config.as_slice(),
+        edited_config.as_bytes(),
         "dry-run changed the user-edited config"
     );
     assert!(!candidate.exists(), "dry-run published a config candidate");
@@ -1169,7 +1184,7 @@ fn install_dry_run_accepts_legacy_config_file_existed_boolean() {
         .collect();
     assert_eq!(
         agent_files_after, agent_files_before,
-        "dry-run changed installed agent files"
+        "dry-run changed an installed agent file"
     );
 }
 
@@ -1202,8 +1217,8 @@ fn remove_accepts_legacy_single_root_manifest() {
   }},
   "created_dirs": ["skills", "skills/marketing-charter"],
   "config": {{
-    "prior": {{ "[\"task\", \"eager\"]": {{ "value": "never" }} }},
-    "installed": {{ "[\"task\", \"eager\"]": {{ "value": "always" }} }}
+    "prior": {{ "[\"task\",\"eager\"]": {{ "value": "never" }} }},
+    "installed": {{ "[\"task\",\"eager\"]": {{ "value": "always" }} }}
   }}
 }}
 "#
