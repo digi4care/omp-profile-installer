@@ -333,12 +333,16 @@ fn validate_symlinks(manifest: &Json, path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Reject a malformed `config` section rather than letting it decode as
+/// Reject malformed `config` section rather than letting it decode as
 /// absence. Each section (`prior`, `installed`) must be an object keyed by
 /// JSON-encoded string-path arrays (Python's `json.dumps(list(parts))`,
 /// either separator spelling) whose entries are exactly
 /// `{"absent": true}` or `{"value": <json>}` — the shapes
-/// [`encode_values`] writes. An absent `config` (legacy or freshly seeded
+/// [`encode_values`] writes. Legacy manifests (installer v0.1/v0.2) also
+/// record a top-level `config.file_existed` boolean; the value is obsolete
+/// (the current installer never reads it), but the boolean form is
+/// accepted, while a non-boolean `file_existed` fails closed like any
+/// other malformed field. An absent `config` (legacy or freshly seeded
 /// manifests) stays valid; anything else fails closed.
 fn validate_config(manifest: &Json, path: &Path) -> Result<(), CliError> {
     let Some(config) = manifest.get("config") else {
@@ -352,6 +356,18 @@ fn validate_config(manifest: &Json, path: &Path) -> Result<(), CliError> {
         ))
     })?;
     for (section, entries) in sections {
+        // The legacy `file_existed` bookkeeping key is no longer used; its
+        // boolean form is accepted, anything else fails closed.
+        if section == "file_existed" {
+            if entries.is_boolean() {
+                continue;
+            }
+            return Err(CliError::Manifest(format!(
+                "ownership manifest '{}' has a malformed \
+                 'config.file_existed' value: expected a boolean",
+                path.display()
+            )));
+        }
         let entries = entries.as_object().ok_or_else(|| {
             CliError::Manifest(format!(
                 "ownership manifest '{}' has a malformed 'config.{section}' \
