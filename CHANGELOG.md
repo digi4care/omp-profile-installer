@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-25
+
+### Fixed
+
+- Resolve release-gate clippy failures without changing behavior.
+
 ### Added
 
 - Target the agent directory of a topology's metadata `profile` (resolved

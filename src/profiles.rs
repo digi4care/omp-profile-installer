@@ -382,10 +382,11 @@ fn omp_config_path_no_create(profile: Option<&str>) -> Result<PathBuf, CliError>
         .map(missing_ancestors)
         .unwrap_or_default();
     let resolved = omp_config_path(profile)?;
-    if !missing.is_empty() && resolved == fsx::resolve_loose(&missing[0]) {
-        if let (Some(home), Some(pin)) = (home.as_deref(), home_pin.as_ref()) {
-            remove_created_dirs(&missing, home, pin, omp_pin.as_ref());
-        }
+    if !missing.is_empty()
+        && resolved == fsx::resolve_loose(&missing[0])
+        && let (Some(home), Some(pin)) = (home.as_deref(), home_pin.as_ref())
+    {
+        remove_created_dirs(&missing, home, pin, omp_pin.as_ref());
     }
     Ok(resolved)
 }
