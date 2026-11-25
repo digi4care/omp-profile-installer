@@ -195,6 +195,16 @@ fn manifest_exists(temp: &TestDir) -> bool {
         .iter()
         .any(|path| path.file_name().is_some_and(|name| name == "manifest.json"))
 }
+fn file_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    files_under(root)
+        .into_iter()
+        .map(|path| {
+            let contents = fs::read(&path)
+                .unwrap_or_else(|err| panic!("failed to snapshot {}: {err}", path.display()));
+            (path, contents)
+        })
+        .collect()
+}
 
 fn is_snapshot_timestamp(text: &str) -> bool {
     let bytes = text.as_bytes();
@@ -1054,6 +1064,701 @@ fn lifecycle_json_alias_and_profile_discovery_are_consumer_visible() {
 }
 
 #[test]
+fn second_alias_dry_run_and_lifecycle_are_isolated_from_legacy_alias() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("omp-dps");
+    let shared_config = "task:\n  eager: true\n";
+    write_topology(
+        &source_root,
+        "omp-dps",
+        shared_config,
+        &[("agents/dps.md", b"dps rules\n")],
+    );
+    let second_topology = write_topology(
+        &source_root,
+        "omp-dps-plus",
+        shared_config,
+        &[("agents/dps-plus.md", b"dps-plus v1\n")],
+    );
+    fs::remove_file(second_topology.join("agent/config.yml"))
+        .expect("failed to make second topology config-free");
+
+    let first_install = install_source(&temp, &agent_dir, &source_root, "omp-dps", None, false);
+    assert_success(&first_install);
+    let first_manifest = manifest_path(&temp);
+    let first_manifest_before =
+        fs::read(&first_manifest).expect("failed to read first alias manifest");
+    let first_file = agent_dir.join("agents/dps.md");
+    let first_file_before = fs::read(&first_file).expect("first alias file is missing");
+    let target_before_dry_run = file_snapshot(&agent_dir);
+    let state_root = temp.state_home().join("omp-topology");
+    let state_before_dry_run = file_snapshot(&state_root);
+
+    let source_arg = source_root.to_string_lossy().into_owned();
+    let agent_dir_arg = agent_dir.to_string_lossy().into_owned();
+    let dry_run = run(
+        &temp,
+        &[
+            "install",
+            "--topology",
+            "omp-dps-plus",
+            "--source",
+            &source_arg,
+            "--alias",
+            "omp-dps-plus",
+            "--dry-run",
+            "--agent-dir",
+            &agent_dir_arg,
+        ],
+    );
+    assert_success(&dry_run);
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        target_before_dry_run,
+        "second-alias dry-run changed target files"
+    );
+    assert_eq!(
+        file_snapshot(&state_root),
+        state_before_dry_run,
+        "second-alias dry-run changed state"
+    );
+
+    let second_install = install_source(
+        &temp,
+        &agent_dir,
+        &source_root,
+        "omp-dps-plus",
+        Some("omp-dps-plus"),
+        false,
+    );
+    assert_success(&second_install);
+    assert_eq!(
+        fs::read(&first_manifest).expect("second install removed first alias manifest"),
+        first_manifest_before,
+        "second install changed first alias ownership"
+    );
+    assert_eq!(
+        fs::read(&first_file).expect("second install removed first alias file"),
+        first_file_before
+    );
+    let manifests = files_under(&state_root)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "manifest.json" || name == "omp-dps-plus.json")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        manifests.len(),
+        2,
+        "second alias did not receive independent ownership state: {manifests:?}"
+    );
+    let second_manifest = manifests
+        .into_iter()
+        .find(|path| path != &first_manifest)
+        .expect("second alias reused the first alias manifest path");
+    let second_manifest_doc: serde_json::Value =
+        serde_json::from_slice(&fs::read(&second_manifest).expect("second manifest is missing"))
+            .expect("second alias manifest is not valid JSON");
+    assert_eq!(second_manifest_doc["topology"], "omp-dps-plus");
+
+    let first_status = json_document(&run(&temp, &["status", "--alias", "omp-dps", "--json"]));
+    assert_eq!(first_status["manifest"], "healthy");
+    let second_status = json_document(&run(
+        &temp,
+        &["status", "--alias", "omp-dps-plus", "--json"],
+    ));
+    assert_eq!(second_status["manifest"], "healthy");
+    assert_eq!(second_status["topology"], "omp-dps-plus");
+
+    let second_file = agent_dir.join("agents/dps-plus.md");
+    fs::write(
+        second_topology.join("agent/agents/dps-plus.md"),
+        b"dps-plus v2\n",
+    )
+    .expect("failed to update second topology fixture");
+    let update = run(&temp, &["update", "--alias", "omp-dps-plus", "--json"]);
+    assert_eq!(json_document(&update)["command"], "update");
+    assert_eq!(
+        fs::read(&second_file).expect("second alias update removed its file"),
+        b"dps-plus v2\n"
+    );
+    assert_eq!(
+        fs::read(&first_file).expect("second alias update removed first alias file"),
+        first_file_before,
+        "second alias update changed the first alias file"
+    );
+    assert_eq!(
+        fs::read(&first_manifest).expect("second alias update removed first manifest"),
+        first_manifest_before,
+        "second alias update changed first alias ownership"
+    );
+    let second_status = json_document(&run(
+        &temp,
+        &["status", "--alias", "omp-dps-plus", "--json"],
+    ));
+    assert_eq!(second_status["freshness"]["status"], "up-to-date");
+
+    let removed = json_document(&run(
+        &temp,
+        &["remove", "--alias", "omp-dps-plus", "--json"],
+    ));
+    assert_eq!(removed["command"], "remove");
+    assert!(!second_file.exists(), "remove retained second alias file");
+    assert_eq!(
+        fs::read(&first_file).expect("removing second alias removed first alias file"),
+        first_file_before
+    );
+    assert_eq!(
+        fs::read(&first_manifest).expect("removing second alias removed first manifest"),
+        first_manifest_before,
+        "removing second alias changed first alias ownership"
+    );
+    assert!(
+        !second_manifest.exists(),
+        "removing second alias retained its ownership manifest"
+    );
+    assert_eq!(
+        json_document(&run(&temp, &["status", "--alias", "omp-dps", "--json"]))["manifest"],
+        "healthy"
+    );
+    let removed_status = run(&temp, &["status", "--alias", "omp-dps-plus", "--json"]);
+    assert!(
+        !removed_status.status.success(),
+        "status still found the removed alias:\n{}",
+        output_text(&removed_status)
+    );
+}
+
+#[test]
+
+fn second_alias_config_merge_cannot_rewrite_another_alias_owned_key() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("omp-dps");
+    write_topology(
+        &source_root,
+        "omp-dps",
+        "task:\n  eager: true\n",
+        &[("agents/dps.md", b"dps rules\n")],
+    );
+    write_topology(
+        &source_root,
+        "omp-dps-plus",
+        "task:\n  eager: false\n",
+        &[("agents/dps-plus.md", b"dps-plus rules\n")],
+    );
+
+    let first_install = install_source(&temp, &agent_dir, &source_root, "omp-dps", None, false);
+    assert_success(&first_install);
+    let first_manifest = manifest_path(&temp);
+    let first_manifest_before =
+        fs::read(&first_manifest).expect("failed to read first alias manifest");
+    let target_before = file_snapshot(&agent_dir);
+    let state_root = temp.state_home().join("omp-topology");
+    let state_before = file_snapshot(&state_root);
+
+    let source_arg = source_root.to_string_lossy().into_owned();
+    let agent_dir_arg = agent_dir.to_string_lossy().into_owned();
+    let rejected = run(
+        &temp,
+        &[
+            "install",
+            "--topology",
+            "omp-dps-plus",
+            "--source",
+            &source_arg,
+            "--alias",
+            "omp-dps-plus",
+            "--config-merge",
+            "--config-precedence",
+            "topology",
+            "--agent-dir",
+            &agent_dir_arg,
+        ],
+    );
+    assert!(
+        !rejected.status.success(),
+        "second alias rewrote a config key owned by the first alias"
+    );
+    let report = output_text(&rejected);
+    assert!(
+        report.contains("omp-dps") && report.contains("config"),
+        "config ownership conflict was not identified:\n{report}"
+    );
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        target_before,
+        "rejected config-key collision changed target files"
+    );
+    assert_eq!(
+        file_snapshot(&state_root),
+        state_before,
+        "rejected config-key collision changed registry or ownership state"
+    );
+    assert_eq!(
+        fs::read(&first_manifest).expect("rejected install removed first manifest"),
+        first_manifest_before
+    );
+    assert_eq!(
+        json_document(&run(&temp, &["status", "--alias", "omp-dps", "--json"]))["manifest"],
+        "healthy"
+    );
+    let second_status = run(&temp, &["status", "--alias", "omp-dps-plus", "--json"]);
+    assert!(
+        !second_status.status.success(),
+        "rejected config-key collision registered the second alias"
+    );
+}
+
+#[test]
+
+fn second_alias_rejects_shared_file_collision_without_mutation() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("omp-dps");
+    let shared_config = "task:\n  eager: true\n";
+    write_topology(
+        &source_root,
+        "omp-dps",
+        shared_config,
+        &[("RULES.md", b"first alias rules\n")],
+    );
+    let second_topology = write_topology(
+        &source_root,
+        "omp-dps-plus",
+        shared_config,
+        &[("RULES.md", b"second alias rules\n")],
+    );
+    fs::remove_file(second_topology.join("agent/config.yml"))
+        .expect("failed to make colliding topology config-free");
+
+    let first_install = install_source(&temp, &agent_dir, &source_root, "omp-dps", None, false);
+    assert_success(&first_install);
+    let first_manifest = manifest_path(&temp);
+    let target_before = file_snapshot(&agent_dir);
+    let state_root = temp.state_home().join("omp-topology");
+    let state_before = file_snapshot(&state_root);
+
+    let rejected = install_source(
+        &temp,
+        &agent_dir,
+        &source_root,
+        "omp-dps-plus",
+        Some("omp-dps-plus"),
+        false,
+    );
+    assert!(
+        !rejected.status.success(),
+        "second alias install accepted a conflicting target file"
+    );
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        target_before,
+        "failed second-alias install mutated target files"
+    );
+    assert_eq!(
+        file_snapshot(&state_root),
+        state_before,
+        "failed second-alias install mutated registry or ownership state"
+    );
+    assert!(
+        first_manifest.exists(),
+        "failed second-alias install removed first alias manifest"
+    );
+    assert_eq!(
+        json_document(&run(&temp, &["status", "--alias", "omp-dps", "--json"]))["manifest"],
+        "healthy"
+    );
+    let second_status = run(&temp, &["status", "--alias", "omp-dps-plus", "--json"]);
+    assert!(
+        !second_status.status.success(),
+        "failed second-alias install registered a new alias:\n{}",
+        output_text(&second_status)
+    );
+}
+
+#[test]
+fn second_alias_rejects_byte_identical_shared_file_without_mutation() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("shared-agent");
+    let shared_config = "task:\n  eager: true\n";
+    write_topology(
+        &source_root,
+        "shared-first",
+        shared_config,
+        &[("RULES.md", b"shared rules\n")],
+    );
+    let second_topology = write_topology(
+        &source_root,
+        "shared-second",
+        shared_config,
+        &[("RULES.md", b"shared rules\n")],
+    );
+    fs::remove_file(second_topology.join("agent/config.yml"))
+        .expect("failed to make second topology config-free");
+
+    let first_install = install_source(
+        &temp,
+        &agent_dir,
+        &source_root,
+        "shared-first",
+        Some("first-alias"),
+        false,
+    );
+    assert_success(&first_install);
+    let first_manifest = manifest_path(&temp);
+    let first_manifest_before = fs::read(&first_manifest).expect("first alias manifest is missing");
+    let shared_file = agent_dir.join("RULES.md");
+    let shared_file_before = fs::read(&shared_file).expect("first alias file is missing");
+    let target_before = file_snapshot(&agent_dir);
+    let state_root = temp.state_home().join("omp-topology");
+    let state_before = file_snapshot(&state_root);
+
+    let rejected = install_source(
+        &temp,
+        &agent_dir,
+        &source_root,
+        "shared-second",
+        Some("second-alias"),
+        false,
+    );
+    assert!(
+        !rejected.status.success(),
+        "second alias accepted a byte-identical file already owned by the first alias"
+    );
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        target_before,
+        "rejected second-alias install changed target files"
+    );
+    assert_eq!(
+        file_snapshot(&state_root),
+        state_before,
+        "rejected second-alias install changed registry or ownership state"
+    );
+    assert_eq!(
+        fs::read(&shared_file).expect("rejected install removed the first alias file"),
+        shared_file_before
+    );
+    assert_eq!(
+        fs::read(&first_manifest).expect("rejected install removed first alias manifest"),
+        first_manifest_before
+    );
+    assert_eq!(
+        json_document(&run(&temp, &["status", "--alias", "first-alias", "--json"]))["manifest"],
+        "healthy"
+    );
+    let second_status = run(&temp, &["status", "--alias", "second-alias", "--json"]);
+    assert!(
+        !second_status.status.success(),
+        "rejected install registered the second alias:\n{}",
+        output_text(&second_status)
+    );
+}
+
+#[test]
+fn second_alias_install_and_remove_preserve_first_alias_recovery_snapshot() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("recovery-alias-agent");
+    let shared_config = "task:\n  eager: true\n";
+    write_topology(
+        &source_root,
+        "recovery-first",
+        shared_config,
+        &[("FIRST.md", b"first alias rules\n")],
+    );
+    let second_topology = write_topology(
+        &source_root,
+        "recovery-second",
+        shared_config,
+        &[("SECOND.md", b"second alias rules\n")],
+    );
+    fs::remove_file(second_topology.join("agent/config.yml"))
+        .expect("failed to make second recovery topology config-free");
+
+    let first_install = install_source(
+        &temp,
+        &agent_dir,
+        &source_root,
+        "recovery-first",
+        Some("first-alias"),
+        false,
+    );
+    assert_success(&first_install);
+    let state_root = manifest_path(&temp)
+        .parent()
+        .expect("first manifest has no agent state directory")
+        .to_path_buf();
+    let first_snapshot = snapshot_transaction_dirs(&state_root)
+        .into_iter()
+        .find(|snapshot| {
+            snapshot
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("install-"))
+        })
+        .expect("first install produced no transaction snapshot");
+    let snapshot_payload = files_under(&first_snapshot)
+        .into_iter()
+        .next()
+        .expect("first install snapshot has no payload");
+    let snapshot_payload_before =
+        fs::read(&snapshot_payload).expect("failed to read first snapshot payload");
+    let first_marker = first_snapshot.join(".recovery-required");
+    let first_marker_bytes =
+        b"retained: recovery required after incomplete rollback (alias 'first-alias')\n";
+    fs::write(&first_marker, first_marker_bytes)
+        .expect("failed to seed first alias recovery marker");
+
+    let snapshots_before_second_install = snapshot_transaction_dirs(&state_root);
+    let second_install = install_source(
+        &temp,
+        &agent_dir,
+        &source_root,
+        "recovery-second",
+        Some("second-alias"),
+        false,
+    );
+    assert_success(&second_install);
+    assert!(
+        first_snapshot.is_dir(),
+        "second alias install deleted the first alias recovery snapshot"
+    );
+    assert_eq!(
+        fs::read(&first_marker).expect("second alias install cleared first alias marker"),
+        first_marker_bytes,
+        "second alias install changed the first alias recovery marker"
+    );
+    assert_eq!(
+        fs::read(&snapshot_payload).expect("second alias install deleted snapshot payload"),
+        snapshot_payload_before
+    );
+
+    let second_snapshot = snapshot_transaction_dirs(&state_root)
+        .difference(&snapshots_before_second_install)
+        .find(|snapshot| {
+            snapshot
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("install-"))
+        })
+        .expect("second install produced no new transaction snapshot")
+        .to_path_buf();
+    let second_marker = second_snapshot.join(".recovery-required");
+    let second_marker_bytes =
+        b"retained: recovery required after incomplete rollback (alias 'second-alias')\n";
+    fs::write(&second_marker, second_marker_bytes)
+        .expect("failed to seed second alias recovery marker");
+
+    let removed = run(&temp, &["remove", "--alias", "second-alias", "--json"]);
+    assert_eq!(json_document(&removed)["command"], "remove");
+    assert!(
+        first_snapshot.is_dir(),
+        "second alias remove deleted the first alias recovery snapshot"
+    );
+    assert_eq!(
+        fs::read(&first_marker).expect("second alias remove cleared first alias marker"),
+        first_marker_bytes,
+        "second alias remove changed the first alias recovery marker"
+    );
+    assert_eq!(
+        fs::read(&snapshot_payload).expect("second alias remove deleted snapshot payload"),
+        snapshot_payload_before
+    );
+    assert!(
+        !second_marker.exists(),
+        "successful second alias remove retained its own recovery marker"
+    );
+    assert_eq!(
+        json_document(&run(&temp, &["status", "--alias", "first-alias", "--json"]))["manifest"],
+        "healthy"
+    );
+}
+
+#[test]
+
+fn aliases_remain_per_alias_after_legacy_owner_is_removed() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("omp-dps");
+    write_topology(
+        &source_root,
+        "omp-dps",
+        "task:\n  eager: true\n",
+        &[("agents/dps.md", b"dps rules\n")],
+    );
+    let b_topology = write_topology(
+        &source_root,
+        "omp-dps-plus",
+        "task:\n  eager: true\n",
+        &[("agents/dps-plus.md", b"dps-plus v1\n")],
+    );
+    fs::remove_file(b_topology.join("agent/config.yml"))
+        .expect("failed to make second topology config-free");
+    write_topology(
+        &source_root,
+        "omp-dps-ci",
+        "task:\n  eager: true\n",
+        &[("agents/dps-ci.md", b"dps-ci v1\n")],
+    );
+    let c_topology = source_root.join("topologies/omp-dps-ci");
+    fs::remove_file(c_topology.join("agent/config.yml"))
+        .expect("failed to make third topology config-free");
+
+    let first_install = install_source(&temp, &agent_dir, &source_root, "omp-dps", None, false);
+    assert_success(&first_install);
+    let legacy_manifest = manifest_path(&temp);
+
+    let b_install = install_source(
+        &temp,
+        &agent_dir,
+        &source_root,
+        "omp-dps-plus",
+        Some("omp-dps-plus"),
+        false,
+    );
+    assert_success(&b_install);
+    let state_root = temp.state_home().join("omp-topology");
+    let manifests_after_b = files_under(&state_root)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "manifest.json" || name == "omp-dps-plus.json")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(manifests_after_b.len(), 2);
+    let b_manifest = manifests_after_b
+        .iter()
+        .find(|path| path.as_path() != legacy_manifest.as_path())
+        .expect("second alias did not get a per-alias manifest")
+        .clone();
+    let b_manifest_before = fs::read(&b_manifest).expect("second alias manifest is missing");
+    let b_file = agent_dir.join("agents/dps-plus.md");
+
+    let removed_a = run(&temp, &["remove", "--alias", "omp-dps", "--json"]);
+    assert_eq!(json_document(&removed_a)["command"], "remove");
+    assert!(
+        !legacy_manifest.exists(),
+        "removing the first alias retained its manifest"
+    );
+    assert!(
+        b_file.exists(),
+        "removing the legacy owner removed the remaining alias file"
+    );
+    assert_eq!(
+        fs::read(&b_manifest).expect("removing the legacy owner removed B's manifest"),
+        b_manifest_before
+    );
+    assert_eq!(
+        json_document(&run(
+            &temp,
+            &["status", "--alias", "omp-dps-plus", "--json"]
+        ))["manifest"],
+        "healthy"
+    );
+
+    let c_install = install_source(
+        &temp,
+        &agent_dir,
+        &source_root,
+        "omp-dps-ci",
+        Some("omp-dps-ci"),
+        false,
+    );
+    assert_success(&c_install);
+    assert!(
+        !legacy_manifest.exists(),
+        "new alias after legacy removal reused or recreated the legacy manifest"
+    );
+    let manifests_after_c = files_under(&state_root)
+        .into_iter()
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                name == "manifest.json" || name == "omp-dps-plus.json" || name == "omp-dps-ci.json"
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        manifests_after_c.len(),
+        2,
+        "installing C did not preserve independent per-alias manifests: {manifests_after_c:?}"
+    );
+    let c_manifest = manifests_after_c
+        .iter()
+        .find(|path| path.as_path() != b_manifest.as_path())
+        .expect("third alias reused B's manifest")
+        .clone();
+    assert!(
+        c_manifest
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "manifests"),
+        "third alias was not assigned a per-alias manifest: {}",
+        c_manifest.display()
+    );
+    let c_manifest_before = fs::read(&c_manifest).expect("third alias manifest is missing");
+    let c_file = agent_dir.join("agents/dps-ci.md");
+    assert_eq!(fs::read(&c_file).unwrap(), b"dps-ci v1\n");
+
+    let direct_status = run_for_agent(&temp, &agent_dir, &["status", "--json"]);
+    assert!(
+        !direct_status.status.success(),
+        "status accepted an ambiguous target without --alias"
+    );
+    assert!(
+        output_text(&direct_status).contains("pass --alias NAME explicitly"),
+        "ambiguous status did not require an explicit alias:\n{}",
+        output_text(&direct_status)
+    );
+
+    fs::write(
+        b_topology.join("agent/agents/dps-plus.md"),
+        b"dps-plus v2\n",
+    )
+    .expect("failed to update B's topology fixture");
+    let update_b = run(&temp, &["update", "--alias", "omp-dps-plus", "--json"]);
+    assert_eq!(json_document(&update_b)["command"], "update");
+    assert_eq!(fs::read(&b_file).unwrap(), b"dps-plus v2\n");
+    assert_eq!(
+        fs::read(&c_file).expect("updating B removed C's file"),
+        b"dps-ci v1\n"
+    );
+    assert_eq!(
+        fs::read(&c_manifest).expect("updating B removed C's manifest"),
+        c_manifest_before,
+        "updating B changed C's ownership"
+    );
+
+    let removed_b = run(&temp, &["remove", "--alias", "omp-dps-plus", "--json"]);
+    assert_eq!(json_document(&removed_b)["command"], "remove");
+    assert!(!b_file.exists(), "removing B retained B's file");
+    assert!(
+        !b_manifest.exists(),
+        "removing B retained B's per-alias manifest"
+    );
+    assert_eq!(
+        fs::read(&c_file).expect("removing B removed C's file"),
+        b"dps-ci v1\n"
+    );
+    assert_eq!(
+        fs::read(&c_manifest).expect("removing B removed C's manifest"),
+        c_manifest_before,
+        "removing B changed C's ownership"
+    );
+    assert!(
+        !legacy_manifest.exists(),
+        "removing B recreated the legacy manifest"
+    );
+    assert_eq!(
+        json_document(&run(&temp, &["status", "--alias", "omp-dps-ci", "--json"]))["manifest"],
+        "healthy"
+    );
+}
+
+#[test]
+
 fn malformed_registry_fails_closed_before_install_mutates_target() {
     let temp = TestDir::new();
     let source_root = temp.0.join("source");

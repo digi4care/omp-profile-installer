@@ -116,7 +116,9 @@ them, so a retry can finish the job.
 ### 🏷️ Alias registry
 Each install is registered under a stable alias (default: the
 profile name) in a versioned JSON registry under the XDG state
-root. Writes are locked; interrupted runs stay honestly `Partial`.
+root. Several aliases may target the same agent directory, each
+with independent ownership. Writes are locked; interrupted runs
+stay honestly `Partial`.
 
 </td>
 </tr>
@@ -180,10 +182,9 @@ of being followed. It is the crate's only `unsafe` boundary.
 ## 🧠 Architecture
 
 The CLI is a single Rust crate. `src/main.rs` parses subcommands with clap and
-orchestrates; per-topology state lives in a versioned ownership manifest per
-agent directory (SHA-256 per installed file, prior config values), and a
-cross-agent alias registry lives under the XDG state root. One install request
-flows like this:
+orchestrates; each alias has an ownership manifest recording SHA-256 hashes of
+installed files and prior config values. A cross-agent alias registry lives
+under the XDG state root. One install request flows like this:
 
 ```
 $ omp-topology install -t digital-product-studio \
@@ -280,17 +281,20 @@ The day-to-day lifecycle is `list → install → status → update → remove`:
    OMP side effect; explicit `--agent-dir` and ambient `omp config path`
    resolution do not create a target directory.
 3. **Install.** The real run applies the overlay in one transaction and
-   registers the alias. Re-installing under the same alias is an upsert; an
-   alias pointing elsewhere, or a second alias for an already-managed agent
-   directory, is refused with an actionable error.
+   registers the alias. Re-installing under the same alias and target is an
+   upsert; an alias pointing elsewhere is refused with an actionable error.
+   A second alias may target the same agent directory: each alias owns only
+   what it installed, and any overlap with another alias's files or config
+   keys is refused before anything is mutated.
 4. **Inspect.** `status --alias <name>` reports what the registry records,
    whether the ownership manifest is healthy, and whether the source has moved
    on (`up to date` / `update available` / `unknown`).
 5. **Update.** `update --alias <name>` re-applies the recorded install against
    the current pin; it is a no-op (no clone) when already current.
 6. **Remove.** `remove --alias <name>` restores prior config values and deletes
-   what the topology added. Files you edited after install are preserved and
-   listed, and the removal stays retryable until everything is resolved.
+   what the topology added under that alias. Files you edited after install are
+   preserved and listed, and the removal stays retryable until everything is
+   resolved.
 
 Every command accepts `--json`, which emits exactly one JSON document on stdout;
 in human mode the captured command lines are printed unchanged. Failures print
@@ -439,9 +443,14 @@ Defaults below are what the code actually applies when the option is absent.
 - **Edit-aware removal** — files edited after install and config keys changed
   by the user are preserved and reported, not clobbered; the ownership manifest
   keeps the unresolved state so a later retry finishes the job.
-- **One topology per agent directory** — a different topology, conflicting
-  alias, or second alias for the same agent directory is refused. Reinstalling
-  the same topology under the same alias and target is an upsert.
+- **One topology per alias, independent ownership** — multiple aliases may
+  target the same agent directory; each alias owns only the files and config
+  keys it installed, tracked per alias in the ownership manifest. Any file or
+  config key already owned by another alias is refused before mutation; no
+  alias overwrites, deletes, or depends on another alias's files or config.
+  Reinstalling under the same alias and target is an
+  upsert; reusing the alias for another target is refused. Ownership manifests
+  written before per-alias ownership (single-alias) remain supported.
 - **Config modes are never remembered** — `update` and `remove` derive their
   behavior from what the ownership manifest recorded, not from flags a previous
   command happened to pass.
@@ -469,8 +478,10 @@ Defaults below are what the code actually applies when the option is absent.
 - **External tools** — profile targeting invokes `omp` (`config path`); GitHub
   sources invoke `git`; release installs and self-update need `curl`, `openssl`,
   and `tar`; the bootstrap needs `sha256sum` (Linux) or `shasum` (macOS).
-- **One topology per agent directory** — installing a different topology into
-  the same agent directory requires removing the current one first.
+- **Cross-alias ownership collisions are refused** — a second alias may
+  install into the same agent directory, but differing file bytes or config
+  values already owned by another alias are a fail-closed collision; remove
+  the owning alias's install first if the overlap must go away.
 - **Freshness can be `unknown`** — when a source cannot be resolved (network
   failure, moved or deleted local checkout, removed topology), `status` says so
   instead of guessing.

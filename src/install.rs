@@ -74,6 +74,14 @@ pub struct InstallOptions<'a> {
     /// Config handling for this run only; config modes are never
     /// remembered between commands.
     pub config_mode: ConfigMode,
+    /// Ownership manifest this install owns (a per-alias manifest when
+    /// several aliases share the agent directory). `None` uses the
+    /// legacy default `manifest.json`.
+    pub manifest_path: Option<&'a Path>,
+    /// Alias performing the install, when invoked through one. Scopes
+    /// recovery markers so a sibling alias's rollback snapshot is never
+    /// cleared.
+    pub alias: Option<&'a str>,
 }
 
 /// Resolve the target agent directory (explicit override or `omp config path`).
@@ -212,6 +220,7 @@ pub fn preflight_target_links(
     agent_dir: Option<&str>,
     skills_dir: Option<&str>,
     state_anchor: &Path,
+    manifest_path: Option<&Path>,
 ) -> Result<(), CliError> {
     let topology_dir = topology::find_topology(topology_root, topology, true)?;
     let agent_dir = resolve_agent_dir(agent_dir)?;
@@ -220,7 +229,14 @@ pub fn preflight_target_links(
     // descriptors, so a swapped-in symlink between check and use is
     // observed instead of followed.
     let roots = Roots::open(&agent_dir)?;
-    let existing_manifest = state::load_manifest(&agent_dir, state_anchor)?;
+    let manifest_path = match manifest_path {
+        Some(path) => path.to_path_buf(),
+        None => state::manifest_path(&agent_dir, state_anchor)?,
+    };
+    let existing_manifest = state::load_manifest_at(&manifest_path, state_anchor)?;
+    // Paths a sibling alias owns are collisions here as well as in `run`;
+    // no shared file or skill ownership is allowed, even when bytes match.
+    let cross_alias = registry::cross_alias_ownership(state_anchor, &agent_dir, &manifest_path)?;
     let recorded_skills_root: Option<String> = existing_manifest
         .as_ref()
         .and_then(|manifest| manifest.get("skills_dir"))
@@ -363,6 +379,13 @@ pub fn preflight_target_links(
         if owned_agent_files.contains(rel) {
             continue;
         }
+        if let Some(owner) = cross_alias.files.get(rel.as_str()) {
+            collisions.push(format!(
+                "{rel} already exists and is managed by alias '{owner}'; \
+                 refusing to overwrite it"
+            ));
+            continue;
+        }
         // Any pre-existing file without our manifest is a collision, even
         // if byte-identical — the same rule `run` applies. The single
         // exception is a file reached through a supported main->topology
@@ -408,6 +431,14 @@ pub fn preflight_target_links(
             // Read for the same io-error parity `run` keeps before the
             // ownership decision.
             let _current = bytes;
+            if let Some(owner) = cross_alias.skills_files.get(rel) {
+                collisions.push(format!(
+                    "{rel} already exists under skills root '{}' and is \
+                     managed by alias '{owner}'; refusing to overwrite it",
+                    root.display()
+                ));
+                continue;
+            }
             if !owned_skill_files.contains(rel) {
                 collisions.push(format!(
                     "{rel} already exists under skills root '{}' and is \
@@ -431,6 +462,12 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     let state_anchor = opts.state_anchor;
     let topology_dir = topology::find_topology(topology_root, opts.topology, true)?;
     let agent_dir = resolve_agent_dir(opts.agent_dir)?;
+    // The ownership manifest this install owns: a per-alias manifest when
+    // several aliases share the agent directory, else the legacy default.
+    let manifest_path = match opts.manifest_path {
+        Some(path) => path.to_path_buf(),
+        None => state::manifest_path(&agent_dir, state_anchor)?,
+    };
     // Pin the agent directory and the OMP profiles/agent trees once for
     // the whole run: declared-link resolution, collision reads, and the
     // per-target re-verifications all go through these descriptors.
@@ -467,15 +504,15 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     // supported main->topology symlink, which is resolved through the
     // same trust and identity validation as topology-declared files.
 
-    let existing_manifest = state::load_manifest(&agent_dir, state_anchor)?;
+    let existing_manifest = state::load_manifest_at(&manifest_path, state_anchor)?;
     validate_manifest_hashes(&existing_manifest)?;
     if let Some(manifest) = &existing_manifest
         && topology::manifest_topology(manifest) != Some(meta_name.as_str())
     {
         let installed = topology::manifest_topology(manifest).unwrap_or("unknown");
         return Err(CliError::Usage(format!(
-            "refusing to install: {} already has topology \
-             '{installed}' installed; one topology per agent directory \
+            "refusing to install: this alias's ownership manifest for {} \
+             records topology '{installed}'; one topology per alias \
              (remove it first)",
             agent_dir.display()
         )));
@@ -485,6 +522,11 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
         .and_then(|manifest| manifest.get("skills_dir"))
         .and_then(Json::as_str)
         .map(str::to_string);
+
+    // Ownership recorded by the *other* aliases of this agent directory.
+    // Every overlap with another alias's files, skills, or config keys fails
+    // closed before any mutation, including byte-identical content.
+    let cross_alias = registry::cross_alias_ownership(state_anchor, &agent_dir, &manifest_path)?;
 
     let mut requested_skills_root: Option<PathBuf> = None;
     if let Some(raw) = opts.skills_dir {
@@ -752,24 +794,34 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
         };
         let current_hash = fsx::sha256_hex(&current);
         if !owned_agent_files.contains(rel) {
-            // Any pre-existing file without our manifest is a collision,
-            // even if byte-identical: remove must never delete a file the
-            // user owned before install. The single exception is a file
-            // reached through a supported main->topology link whose live
-            // bytes exactly match the topology source — the hand-made
-            // equivalent of what install would have written. It is
-            // adopted and flagged pre-existing so remove and source-drop
-            // release it without deleting; a differing unowned target,
-            // linked or not, still refuses.
-            let adopted = link_identities.contains_key(rel)
-                && agent_source_hashes.get(rel) == Some(&current_hash);
-            if !adopted {
+            // A sibling alias of this agent directory already managing
+            // this path is a collision naming the owner — even for
+            // byte-identical bytes; there is no shared file ownership.
+            if let Some(owner) = cross_alias.files.get(rel) {
                 collisions.push(format!(
-                    "{rel} already exists and is not owned by this topology \
-                     (unowned file-name collision)"
+                    "{rel} already exists and is managed by alias '{owner}'; \
+                     refusing to overwrite it"
                 ));
             } else {
-                preexisting_files.insert(rel.clone());
+                // Any pre-existing file without our manifest is a collision,
+                // even if byte-identical: remove must never delete a file the
+                // user owned before install. The single exception is a file
+                // reached through a supported main->topology link whose live
+                // bytes exactly match the topology source — the hand-made
+                // equivalent of what install would have written. It is
+                // adopted and flagged pre-existing so remove and source-drop
+                // release it without deleting; a differing unowned target,
+                // linked or not, still refuses.
+                let adopted = link_identities.contains_key(rel)
+                    && agent_source_hashes.get(rel) == Some(&current_hash);
+                if !adopted {
+                    collisions.push(format!(
+                        "{rel} already exists and is not owned by this topology \
+                         (unowned file-name collision)"
+                    ));
+                } else {
+                    preexisting_files.insert(rel.clone());
+                }
             }
         } else {
             // Retain backup bytes only for owned, unedited files this
@@ -826,14 +878,25 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
             };
             let current_hash = fsx::sha256_hex(&current);
             if !owned_skill_files.contains(rel) {
-                // Owned skill files never collide: unedited copies are
-                // updated in place, while copies the user edited or
-                // deleted are preserved by the update planning below.
-                collisions.push(format!(
-                    "{rel} already exists under skills root '{}' and is \
-                     not owned by this topology (unowned file-name collision)",
-                    root.display()
-                ));
+                if let Some(owner) = cross_alias.skills_files.get(rel) {
+                    // Sibling alias already manages this skill file: a
+                    // collision naming the owner, even for byte-identical
+                    // bytes — there is no shared file ownership.
+                    collisions.push(format!(
+                        "{rel} already exists under skills root '{}' and is \
+                         managed by alias '{owner}'; refusing to overwrite it",
+                        root.display()
+                    ));
+                } else {
+                    // Owned skill files never collide: unedited copies are
+                    // updated in place, while copies the user edited or
+                    // deleted are preserved by the update planning below.
+                    collisions.push(format!(
+                        "{rel} already exists under skills root '{}' and is \
+                         not owned by this topology (unowned file-name collision)",
+                        root.display()
+                    ));
+                }
             } else {
                 // Retain backup bytes only for owned, unedited skill
                 // files this update will actually overwrite.
@@ -971,6 +1034,24 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     value::leaf_paths(&topo_model, &mut Vec::new(), &mut topo_leafs);
     let topo_leaf_set: BTreeSet<Vec<String>> = topo_leafs.iter().cloned().collect();
 
+    // Config keys another alias of this agent directory already owns are
+    // off limits in every mode, even when the live value happens to
+    // match: leaving them unrecorded here would let the sibling's remove
+    // restore or delete a key this topology still needs, and there is no
+    // shared config ownership.
+    if let Some((leaf, owner)) = cross_alias
+        .config_installed
+        .iter()
+        .find(|(parts, _)| topo_leaf_set.contains(*parts))
+    {
+        return Err(CliError::Usage(format!(
+            "refusing to install: config key '{}' is already managed by \
+             alias '{owner}' for {}; refusing to overwrite it",
+            leaf.join("."),
+            agent_dir.display()
+        )));
+    }
+
     // Planned changes to the active config and the candidate publication.
     // `merged_bytes` replaces the active config; `candidate_action`
     // publishes or withdraws `config.yml.new` beside an untouched active
@@ -1000,6 +1081,18 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     match &opts.config_mode {
         ConfigMode::Candidate => {
             let candidate_path = agent_dir.join(CONFIG_NEW_NAME);
+            // config.yml.new is single-owner: publishing or deleting beside
+            // another alias's candidate would corrupt that alias's rollback
+            // bookkeeping, so a sibling-owned candidate always fails closed.
+            if let Some(owner) = &cross_alias.candidate_owner {
+                return Err(CliError::Usage(format!(
+                    "refusing to install: '{}' is already managed by alias \
+                     '{owner}' for {}; remove that candidate (or that alias) \
+                     first",
+                    candidate_path.display(),
+                    agent_dir.display()
+                )));
+            }
             if original_config.is_none() && existing_manifest.is_none() {
                 // Initial install: the active config is created from the
                 // topology config only when absent. Serialize the already
@@ -1812,7 +1905,6 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     // (on a first install the planning pins opened before it existed).
     let roots = symlinks::Roots::open(&agent_dir)?;
     let state_dir = state::agent_state_dir(&agent_dir, state_anchor)?;
-    let manifest_path = state::manifest_path(&agent_dir, state_anchor)?;
     let backup_dir = state_dir
         .join("backups")
         .join(format!("install-{}", fsx::timestamp()));
@@ -2088,7 +2180,7 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
             unrestored.join("\n  - "),
             backup_dir.display()
         );
-        if let Err(marker_exc) = registry::mark_recovery_snapshot(&backup_dir) {
+        if let Err(marker_exc) = registry::mark_recovery_snapshot(&backup_dir, opts.alias) {
             message.push_str(&format!(
                 "\nwarning: could not mark the retained snapshot as \
                  recovery-required; ordinary retention may delete it: \
@@ -2138,9 +2230,18 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
     // Recovery markers left by earlier failed installs/releases are
     // released only now, after this install completed successfully, and
     // before ordinary pruning — marked snapshots survive until a clean
-    // reconciliation clears them. Like pruning, a clear failure must
-    // never fail the install, so it surfaces as a warning line.
-    if let Err(exc) = registry::clear_recovery_snapshots(&agent_dir, state_anchor) {
+    // reconciliation clears them. Only this alias's markers (and, for the
+    // legacy-manifest owner, pre-alias unscoped markers) are cleared; a
+    // sibling alias's recovery snapshot stays pinned. Like pruning, a
+    // clear failure must never fail the install, so it surfaces as a
+    // warning line.
+    let owns_legacy_manifest = manifest_path == state::manifest_path(&agent_dir, state_anchor)?;
+    if let Err(exc) = registry::clear_recovery_snapshots(
+        &agent_dir,
+        state_anchor,
+        opts.alias,
+        owns_legacy_manifest,
+    ) {
         out.push(format!("warning: could not clear recovery markers: {exc}"));
     }
     // Prune old snapshots after the successful mutation only; a prune
@@ -3075,6 +3176,8 @@ mod tests {
             skills_dir: None,
             dry_run: false,
             config_mode: ConfigMode::Replace,
+            manifest_path: None,
+            alias: None,
         };
         let mut output = Vec::new();
         let result = state::with_state_home_for_test(&state_home, || {

@@ -500,6 +500,30 @@ fn default_alias(target: &profiles::ResolvedTarget) -> Result<String, CliError> 
     Ok(basename.to_ascii_lowercase())
 }
 
+/// Which ownership manifest an install under `alias` owns at `agent_dir`:
+/// an already-registered alias keeps its recorded slot; a new alias owns
+/// the legacy per-agent manifest only when no other alias targets the
+/// directory, else its own per-alias manifest, so two aliases never share
+/// one ownership record.
+fn manifest_slot_for(
+    registry_doc: &registry::Registry,
+    alias: &str,
+    agent_dir: &Path,
+) -> state::ManifestSlot {
+    if let Some(existing) = registry_doc.get(alias) {
+        return existing.manifest_slot;
+    }
+    if registry_doc
+        .aliases
+        .values()
+        .any(|entry| entry.agent_dir == agent_dir)
+    {
+        state::ManifestSlot::PerAlias
+    } else {
+        state::ManifestSlot::Legacy
+    }
+}
+
 fn cmd_list(args: &ListArgs) -> Result<i32, CliError> {
     require_source_for_ref(&args.source, &args.reference)?;
     // An explicit source is resolved ephemerally: no persistent cache.
@@ -640,33 +664,26 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     };
     // Validate the alias and settle conflicts before any side effect: a
     // reinstall under the same alias for the same target is an upsert; an
-    // alias that maps elsewhere is refused, and a second alias for an
-    // agent directory already managed under another alias is refused so
-    // profile-to-alias lookup stays unambiguous.
+    // alias that maps elsewhere is refused. Several aliases may share one
+    // agent directory: the first alias owns the legacy per-agent
+    // manifest.json, every additional alias owns its per-alias
+    // manifests/<alias>.json, so ownership state is never shared between
+    // aliases.
     registry::validate_alias(&alias)?;
     let registry_doc = registry::load_registry(&anchor)?;
-    if let Some(existing) = registry_doc.get(&alias) {
-        if existing.agent_dir != target.agent_dir || existing.topology != args.topology {
-            return Err(CliError::Usage(format!(
-                "alias '{alias}' is already registered for '{}' in {}; it \
-                 cannot be reused for '{}' in {}",
-                existing.topology,
-                existing.agent_dir.display(),
-                args.topology,
-                target.agent_dir.display()
-            )));
-        }
-    } else if let Some((other_alias, _)) = registry_doc
-        .aliases
-        .iter()
-        .find(|(_, entry)| entry.agent_dir == target.agent_dir)
+    if let Some(existing) = registry_doc.get(&alias)
+        && (existing.agent_dir != target.agent_dir || existing.topology != args.topology)
     {
         return Err(CliError::Usage(format!(
-            "agent directory {} is already managed under alias '{other_alias}'; \
-             remove or update that alias instead of creating a second one",
+            "alias '{alias}' is already registered for '{}' in {}; it \
+             cannot be reused for '{}' in {}",
+            existing.topology,
+            existing.agent_dir.display(),
+            args.topology,
             target.agent_dir.display()
         )));
     }
+    let manifest_slot = manifest_slot_for(&registry_doc, &alias, &target.agent_dir);
 
     // Real installs from an explicit source cache persistently; dry runs
     // clone into a temporary directory that SourceCheckout removes on drop.
@@ -694,6 +711,8 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     };
 
     let agent_dir_text = target.agent_dir.to_string_lossy().into_owned();
+    let manifest_path =
+        state::manifest_path_for_slot(&target.agent_dir, &anchor, &alias, manifest_slot)?;
     // Config handling for this command only; never remembered.
     let config_mode = config_mode_from_flags(
         args.config_merge,
@@ -731,6 +750,7 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
         Some(&agent_dir_text),
         args.skills_dir.as_deref(),
         &anchor,
+        Some(&manifest_path),
     ) {
         let mut out = Vec::new();
         prune_after_failed_install(
@@ -751,6 +771,39 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     } else {
         Some(registry::RegistryLock::acquire(&anchor)?)
     };
+    // Re-decide the ownership slot under the lock: the preflight snapshot
+    // may predate a concurrent registration, and the slot decides every
+    // ownership-manifest read/write below.
+    let (manifest_slot, manifest_path) = if _lock.is_some() {
+        let locked_doc = registry::load_registry(&anchor)?;
+        if let Some(existing) = locked_doc.get(&alias)
+            && (existing.agent_dir != target.agent_dir || existing.topology != args.topology)
+        {
+            let exc = CliError::Usage(format!(
+                "alias '{alias}' is already registered for '{}' in {}; it \
+                 cannot be reused for '{}' in {}",
+                existing.topology,
+                existing.agent_dir.display(),
+                args.topology,
+                target.agent_dir.display()
+            ));
+            let mut out = Vec::new();
+            prune_after_failed_install(
+                &anchor,
+                &source_spec,
+                resolved.commit(),
+                args.dry_run,
+                &mut out,
+            );
+            preserve_lines(args.json, &out);
+            return Err(exc);
+        }
+        let slot = manifest_slot_for(&locked_doc, &alias, &target.agent_dir);
+        let path = state::manifest_path_for_slot(&target.agent_dir, &anchor, &alias, slot)?;
+        (slot, path)
+    } else {
+        (manifest_slot, manifest_path)
+    };
     let mut out = Vec::new();
     let code = match install::run(
         &install::InstallOptions {
@@ -761,6 +814,8 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
             skills_dir: args.skills_dir.as_deref(),
             dry_run: args.dry_run,
             config_mode,
+            manifest_path: Some(&manifest_path),
+            alias: Some(&alias),
         },
         &mut out,
     ) {
@@ -806,7 +861,7 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     // target. A failure inside `with_registry` leaves the target mutated
     // but the registry unrecorded, so it routes through
     // `registry_commit_failed`.
-    let entry = RegistryEntry::new(
+    let mut entry = RegistryEntry::new(
         target.agent_dir.clone(),
         target.profile.clone(),
         args.topology.clone(),
@@ -815,6 +870,7 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
         resolved.commit().map(str::to_string),
         overlay_digest,
     );
+    entry.manifest_slot = manifest_slot;
 
     // Re-registering an unchanged managed target must not churn installer
     // state: the entry inserted below starts as a fresh stamp, but the
@@ -843,16 +899,6 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
                 )));
             }
             entry_for_merge.installed_at = existing.installed_at.clone();
-        } else if let Some((other_alias, _)) = doc
-            .aliases
-            .iter()
-            .find(|(_, entry)| entry.agent_dir == target.agent_dir)
-        {
-            return Err(CliError::Registry(format!(
-                "agent directory {} was registered concurrently under alias \
-                 '{other_alias}'; refusing to create a second alias",
-                target.agent_dir.display()
-            )));
         }
         doc.insert(alias.clone(), entry_for_merge)?;
         for source in old_source.into_iter().chain([entry.source.clone()]) {
@@ -969,13 +1015,48 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
             (topology.clone(), target.agent_dir.clone(), matching)
         };
 
+    // Resolve which ownership manifest this removal operates on: an
+    // explicit alias uses its recorded slot; a direct target with exactly
+    // one matching alias uses that alias's slot; a direct target with
+    // several matching aliases is ambiguous and must name one; no matching
+    // alias falls back to the legacy per-agent manifest. The resolved
+    // alias also scopes recovery-marker cleanup so a sibling alias's
+    // retained rollback snapshot is never cleared.
+    let (manifest_path, scope_alias): (PathBuf, Option<&str>) = if let Some(alias) = &args.alias {
+        let entry = registry_doc.get(alias).expect("validated above");
+        (
+            state::manifest_path_for_slot(&agent_dir, &anchor, alias, entry.manifest_slot)?,
+            Some(alias.as_str()),
+        )
+    } else {
+        match matching_aliases.len() {
+            0 => (state::manifest_path(&agent_dir, &anchor)?, None),
+            1 => {
+                let alias = &matching_aliases[0];
+                let entry = registry_doc.get(alias).expect("collected above");
+                (
+                    state::manifest_path_for_slot(&agent_dir, &anchor, alias, entry.manifest_slot)?,
+                    Some(alias.as_str()),
+                )
+            }
+            _ => {
+                return Err(CliError::Usage(format!(
+                    "multiple aliases ({}) target {} for topology '{topology}'; \
+                     pass --alias NAME to select one",
+                    matching_aliases.join(", "),
+                    agent_dir.display()
+                )));
+            }
+        }
+    };
+
     // Stale alias: the registry still records the install but the target
     // has no ownership manifest (e.g. a previous removal succeeded while
     // its registry write failed). Reconcile the registry directly and
     // never touch target files; remove::run would refuse here, and
     // dry-run stays read-only.
     if args.alias.is_some() {
-        match state::load_manifest(&agent_dir, &anchor) {
+        match state::load_manifest_at(&manifest_path, &anchor) {
             Ok(None) => {
                 let mut out = Vec::new();
                 if args.dry_run {
@@ -1001,8 +1082,11 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
                     &anchor,
                     &matching_aliases,
                     false,
-                    &topology,
-                    &agent_dir,
+                    RemovalScope {
+                        topology: &topology,
+                        agent_dir: &agent_dir,
+                        manifest_path: &manifest_path,
+                    },
                     args.json,
                     &out,
                 )?;
@@ -1032,6 +1116,8 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
             agent_dir: Some(&agent_dir_text),
             skills_dir: args.skills_dir.as_deref(),
             dry_run: args.dry_run,
+            manifest_path: Some(&manifest_path),
+            alias: scope_alias,
         },
         &mut out,
     ) {
@@ -1055,7 +1141,7 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
     // The target is already mutated here: the manifest decides drop vs.
     // Partial, and any reconciliation failure is reported with the target
     // state and a recovery path, not a bare `?`.
-    let manifest_present = match state::load_manifest(&agent_dir, &anchor) {
+    let manifest_present = match state::load_manifest_at(&manifest_path, &anchor) {
         Ok(manifest) => manifest.is_some(),
         Err(exc) => {
             let recovery = format!(
@@ -1072,8 +1158,11 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
         &anchor,
         &matching_aliases,
         manifest_present,
-        &topology,
-        &agent_dir,
+        RemovalScope {
+            topology: &topology,
+            agent_dir: &agent_dir,
+            manifest_path: &manifest_path,
+        },
         args.json,
         &out,
     )?;
@@ -1107,15 +1196,25 @@ struct ReconciledRemoval {
 /// manifest is treated as present, so uncertainty always retains the
 /// alias. On a registry failure the captured `out` lines are preserved
 /// and the error states the target state and recovery path.
+struct RemovalScope<'a> {
+    topology: &'a str,
+    agent_dir: &'a Path,
+    manifest_path: &'a Path,
+}
+
 fn reconcile_removal(
     anchor: &Path,
     aliases: &[String],
     manifest_present: bool,
-    topology: &str,
-    agent_dir: &Path,
+    scope: RemovalScope<'_>,
     json: bool,
     out: &[String],
 ) -> Result<ReconciledRemoval, CliError> {
+    let RemovalScope {
+        topology,
+        agent_dir,
+        manifest_path,
+    } = scope;
     let mut result = ReconciledRemoval {
         pruned_sources: Vec::new(),
         removed_aliases: Vec::new(),
@@ -1143,7 +1242,7 @@ fn reconcile_removal(
             let present = if manifest_present {
                 true
             } else {
-                match state::load_manifest(agent_dir, anchor) {
+                match state::load_manifest_at(manifest_path, anchor) {
                     Ok(Some(_)) => {
                         result.retained_aliases.push(alias.clone());
                         true
@@ -1579,8 +1678,12 @@ mod tests {
                 &anchor,
                 &[alias.to_string()],
                 false,
-                topology,
-                &agent_dir,
+                RemovalScope {
+                    topology,
+                    agent_dir: &agent_dir,
+                    manifest_path: &state::manifest_path(&agent_dir, &anchor)
+                        .expect("failed to resolve manifest path"),
+                },
                 false,
                 &[],
             )

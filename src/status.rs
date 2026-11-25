@@ -121,7 +121,7 @@ pub fn status_for_entry(
     entry: &RegistryEntry,
     state_anchor: &Path,
 ) -> Result<AliasStatus, CliError> {
-    let manifest = manifest_status(entry, state_anchor)?;
+    let manifest = manifest_status(alias, entry, state_anchor)?;
     let freshness = freshness(entry);
     Ok(AliasStatus {
         alias: alias.to_string(),
@@ -140,8 +140,15 @@ pub fn status_for_entry(
 }
 
 /// Manifest presence/health: present and its topology matches the entry.
-fn manifest_status(entry: &RegistryEntry, state_anchor: &Path) -> Result<ManifestStatus, CliError> {
-    let Some(manifest) = state::load_manifest(&entry.agent_dir, state_anchor)? else {
+/// Reads the ownership manifest the alias owns (per-alias or legacy).
+fn manifest_status(
+    alias: &str,
+    entry: &RegistryEntry,
+    state_anchor: &Path,
+) -> Result<ManifestStatus, CliError> {
+    let manifest_path =
+        state::manifest_path_for_slot(&entry.agent_dir, state_anchor, alias, entry.manifest_slot)?;
+    let Some(manifest) = state::load_manifest_at(&manifest_path, state_anchor)? else {
         return Ok(ManifestStatus::Missing);
     };
     match topology::manifest_topology(&manifest) {

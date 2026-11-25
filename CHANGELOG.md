@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Allow multiple registry aliases to target the same agent directory, each
+  with independent per-alias ownership. Cross-alias file or config ownership
+  collisions fail closed before any mutation — no alias overwrites or deletes
+  another alias's files or config — and `status`, `update`, and `remove`
+  stay scoped to their alias. Existing single-alias legacy ownership
+  manifests remain supported.
+
 ## [0.2.2] - 2026-11-25
 
 ### Fixed
