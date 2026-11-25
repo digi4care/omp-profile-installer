@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-25
+
+### Fixed
+
+- Resolve release-gate clippy failures without changing behavior.
+- Preserve the file mode conversion on Apple targets.
+
 ### Added
 
 - Add `--profile NAME` to `install`, `remove`, and `status` for explicit
