@@ -1172,6 +1172,33 @@ fn second_alias_dry_run_and_lifecycle_are_isolated_from_legacy_alias() {
     assert_eq!(second_status["manifest"], "healthy");
     assert_eq!(second_status["topology"], "omp-dps-plus");
 
+    let lifecycle_target_before_dry_run = file_snapshot(&agent_dir);
+    let lifecycle_state_before_dry_run = file_snapshot(&state_root);
+    let update_dry_run = run(&temp, &["update", "--alias", "omp-dps-plus", "--dry-run"]);
+    assert_success(&update_dry_run);
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        lifecycle_target_before_dry_run,
+        "multi-alias update dry-run changed target files"
+    );
+    assert_eq!(
+        file_snapshot(&state_root),
+        lifecycle_state_before_dry_run,
+        "multi-alias update dry-run changed registry or ownership manifests"
+    );
+    let remove_dry_run = run(&temp, &["remove", "--alias", "omp-dps-plus", "--dry-run"]);
+    assert_success(&remove_dry_run);
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        lifecycle_target_before_dry_run,
+        "multi-alias remove dry-run changed target files"
+    );
+    assert_eq!(
+        file_snapshot(&state_root),
+        lifecycle_state_before_dry_run,
+        "multi-alias remove dry-run changed registry or ownership manifests"
+    );
+
     let second_file = agent_dir.join("agents/dps-plus.md");
     fs::write(
         second_topology.join("agent/agents/dps-plus.md"),
@@ -1456,6 +1483,459 @@ fn second_alias_rejects_byte_identical_shared_file_without_mutation() {
         !second_status.status.success(),
         "rejected install registered the second alias:\n{}",
         output_text(&second_status)
+    );
+}
+
+#[test]
+fn checked_in_digital_product_studio_alias_collisions_fail_closed_in_both_orders() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (first_topology, first_alias, second_topology, second_alias) in [
+        (
+            "digital-product-studio",
+            "dps-owner",
+            "digital-product-studio-plus",
+            "dps-plus-owner",
+        ),
+        (
+            "digital-product-studio-plus",
+            "dps-plus-owner",
+            "digital-product-studio",
+            "dps-owner",
+        ),
+    ] {
+        let temp = TestDir::new();
+        let agent_dir = temp.0.join("shared-agent");
+        let first_install = install_source(
+            &temp,
+            &agent_dir,
+            source_root,
+            first_topology,
+            Some(first_alias),
+            false,
+        );
+        assert_success(&first_install);
+
+        let first_manifest = manifest_path(&temp);
+        let first_manifest_before =
+            fs::read(&first_manifest).expect("first alias manifest is missing");
+        let target_before = file_snapshot(&agent_dir);
+        let state_root = temp.state_home().join("omp-topology");
+        let state_before = file_snapshot(&state_root);
+        let source_arg = source_root.to_string_lossy().into_owned();
+
+        let dry_run = run_for_agent(
+            &temp,
+            &agent_dir,
+            &[
+                "install",
+                "--topology",
+                second_topology,
+                "--source",
+                &source_arg,
+                "--alias",
+                second_alias,
+                "--dry-run",
+            ],
+        );
+        assert!(
+            !dry_run.status.success(),
+            "dry-run accepted {second_topology} over {first_topology} in one agent directory:\n{}",
+            output_text(&dry_run)
+        );
+        let dry_run_report = output_text(&dry_run);
+        assert!(
+            dry_run_report.contains(first_alias) && dry_run_report.contains("RULES.md"),
+            "dry-run collision did not identify the first alias and shared RULES.md path:\n{dry_run_report}"
+        );
+        assert_eq!(
+            file_snapshot(&agent_dir),
+            target_before,
+            "rejected real-topology dry-run changed target files"
+        );
+        assert_eq!(
+            file_snapshot(&state_root),
+            state_before,
+            "rejected real-topology dry-run changed registry or manifests"
+        );
+
+        let rejected = install_source(
+            &temp,
+            &agent_dir,
+            source_root,
+            second_topology,
+            Some(second_alias),
+            false,
+        );
+        assert!(
+            !rejected.status.success(),
+            "install accepted {second_topology} over {first_topology} in one agent directory:\n{}",
+            output_text(&rejected)
+        );
+        let report = output_text(&rejected);
+        assert!(
+            report.contains(first_alias) && report.contains("RULES.md"),
+            "collision did not identify the first alias and shared RULES.md path:\n{report}"
+        );
+        assert_eq!(
+            file_snapshot(&agent_dir),
+            target_before,
+            "rejected real-topology install changed target files"
+        );
+        assert_eq!(
+            file_snapshot(&state_root),
+            state_before,
+            "rejected real-topology install changed registry or manifests"
+        );
+        assert_eq!(
+            fs::read(&first_manifest).expect("rejected install changed first alias manifest"),
+            first_manifest_before
+        );
+        assert_eq!(
+            json_document(&run(&temp, &["status", "--alias", first_alias, "--json"]))["manifest"],
+            "healthy",
+            "first alias became unhealthy after the rejected collision"
+        );
+        let second_status = run(&temp, &["status", "--alias", second_alias, "--json"]);
+        assert!(
+            !second_status.status.success(),
+            "rejected collision registered the second alias:\n{}",
+            output_text(&second_status)
+        );
+    }
+}
+
+#[test]
+fn second_alias_cannot_claim_first_alias_config_candidate() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("candidate-agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let config = agent_dir.join("config.yml");
+    let original_config = b"local:\n  value: keep\n";
+    fs::write(&config, original_config).expect("failed to seed active config");
+
+    let first_config = "first:\n  value: owned\n";
+    write_topology(
+        &source_root,
+        "candidate-first",
+        first_config,
+        &[("agents/candidate-first.md", b"first alias\n")],
+    );
+    write_topology(
+        &source_root,
+        "candidate-second",
+        "second:\n  value: disjoint\n",
+        &[("agents/candidate-second.md", b"second alias\n")],
+    );
+
+    let source_arg = source_root.to_string_lossy().into_owned();
+    let first_install = run_for_agent(
+        &temp,
+        &agent_dir,
+        &[
+            "install",
+            "--topology",
+            "candidate-first",
+            "--source",
+            &source_arg,
+            "--alias",
+            "candidate-owner",
+        ],
+    );
+    assert_success(&first_install);
+    let candidate = agent_dir.join("config.yml.new");
+    assert_eq!(
+        fs::read(&candidate).expect("first alias did not publish its config candidate"),
+        first_config.as_bytes()
+    );
+    let first_manifest = manifest_path(&temp);
+    let first_manifest_before = fs::read(&first_manifest).expect("first alias manifest is missing");
+    let target_before = file_snapshot(&agent_dir);
+    let state_root = temp.state_home().join("omp-topology");
+    let state_before = file_snapshot(&state_root);
+
+    let rejected = run_for_agent(
+        &temp,
+        &agent_dir,
+        &[
+            "install",
+            "--topology",
+            "candidate-second",
+            "--source",
+            &source_arg,
+            "--alias",
+            "candidate-contender",
+        ],
+    );
+    assert!(
+        !rejected.status.success(),
+        "second alias claimed the first alias's config.yml.new candidate"
+    );
+    let report = output_text(&rejected);
+    assert!(
+        report.contains("candidate-owner") && report.contains("config.yml.new"),
+        "candidate collision did not identify its owner and path:\n{report}"
+    );
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        target_before,
+        "rejected candidate collision changed active config, candidate, or target files"
+    );
+    assert_eq!(
+        fs::read(&config).expect("rejected candidate install changed active config"),
+        original_config
+    );
+    assert_eq!(
+        fs::read(&candidate).expect("rejected candidate install removed the candidate"),
+        first_config.as_bytes()
+    );
+    assert_eq!(
+        file_snapshot(&state_root),
+        state_before,
+        "rejected candidate collision changed registry or manifests"
+    );
+    assert_eq!(
+        fs::read(&first_manifest).expect("rejected install changed first alias manifest"),
+        first_manifest_before
+    );
+    assert_eq!(
+        json_document(&run(
+            &temp,
+            &["status", "--alias", "candidate-owner", "--json"]
+        ))["manifest"],
+        "healthy"
+    );
+}
+
+#[test]
+fn remove_scopes_same_relative_skills_to_each_recorded_root() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("shared-agent");
+    let first_topology = write_topology(
+        &source_root,
+        "skills-first",
+        "",
+        &[
+            ("agents/first.md", b"first alias\n"),
+            ("skills/shared/SKILL.md", b"first root skill\n"),
+        ],
+    );
+    let second_topology = write_topology(
+        &source_root,
+        "skills-second",
+        "",
+        &[
+            ("agents/second.md", b"second alias\n"),
+            ("skills/shared/SKILL.md", b"second root skill\n"),
+        ],
+    );
+    fs::remove_file(first_topology.join("agent/config.yml"))
+        .expect("failed to make first topology config-free");
+    fs::remove_file(second_topology.join("agent/config.yml"))
+        .expect("failed to make second topology config-free");
+
+    let source_arg = source_root.to_string_lossy().into_owned();
+    let first_skills_root = temp.0.join("skills-first-root");
+    let first_skills_arg = first_skills_root.to_string_lossy().into_owned();
+    let first_install = run_for_agent(
+        &temp,
+        &agent_dir,
+        &[
+            "install",
+            "--topology",
+            "skills-first",
+            "--source",
+            &source_arg,
+            "--alias",
+            "skills-first-owner",
+            "--skills-dir",
+            &first_skills_arg,
+        ],
+    );
+    assert_success(&first_install);
+
+    let second_skills_root = temp.0.join("skills-second-root");
+    let second_skills_arg = second_skills_root.to_string_lossy().into_owned();
+    let second_install = run_for_agent(
+        &temp,
+        &agent_dir,
+        &[
+            "install",
+            "--topology",
+            "skills-second",
+            "--source",
+            &source_arg,
+            "--alias",
+            "skills-second-owner",
+            "--skills-dir",
+            &second_skills_arg,
+        ],
+    );
+    assert_success(&second_install);
+
+    let first_skill = first_skills_root.join("shared/SKILL.md");
+    let second_skill = second_skills_root.join("shared/SKILL.md");
+    assert_eq!(
+        fs::read(&first_skill).expect("first alias skill is missing"),
+        b"first root skill\n"
+    );
+    assert_eq!(
+        fs::read(&second_skill).expect("second alias skill is missing"),
+        b"second root skill\n"
+    );
+
+    let removed = run(&temp, &["remove", "--alias", "skills-first-owner"]);
+    assert_success(&removed);
+    assert!(
+        !first_skill.exists(),
+        "removing the first alias retained its skill under its recorded root"
+    );
+    assert_eq!(
+        fs::read(&second_skill).expect("removing the first alias deleted the sibling skill"),
+        b"second root skill\n"
+    );
+    assert!(
+        !agent_dir.join("agents/first.md").exists(),
+        "removing the first alias retained its agent file"
+    );
+    assert!(
+        agent_dir.join("agents/second.md").is_file(),
+        "removing the first alias deleted the sibling agent file"
+    );
+    assert_eq!(
+        json_document(&run(
+            &temp,
+            &["status", "--alias", "skills-second-owner", "--json"]
+        ))["manifest"],
+        "healthy"
+    );
+}
+
+#[test]
+fn replace_update_cannot_remove_another_alias_merge_owned_config_key() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("replace-agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    fs::write(agent_dir.join("config.yml"), b"local:\n  value: original\n")
+        .expect("failed to seed active config");
+
+    let first_topology = write_topology(
+        &source_root,
+        "replace-first",
+        "replace_owned:\n  value: first\n",
+        &[("agents/replace-first.md", b"first alias\n")],
+    );
+    write_topology(
+        &source_root,
+        "merge-second",
+        "merge_owned:\n  value: sibling\n",
+        &[("agents/merge-second.md", b"second alias\n")],
+    );
+    let source_arg = source_root.to_string_lossy().into_owned();
+    let first_install = run_for_agent(
+        &temp,
+        &agent_dir,
+        &[
+            "install",
+            "--topology",
+            "replace-first",
+            "--source",
+            &source_arg,
+            "--alias",
+            "replace-owner",
+            "--config-replace",
+        ],
+    );
+    assert_success(&first_install);
+    let second_install = run_for_agent(
+        &temp,
+        &agent_dir,
+        &[
+            "install",
+            "--topology",
+            "merge-second",
+            "--source",
+            &source_arg,
+            "--alias",
+            "merge-owner",
+            "--config-merge",
+            "--config-precedence",
+            "topology",
+        ],
+    );
+    assert_success(&second_install);
+    let config = agent_dir.join("config.yml");
+    let config_before_update = fs::read(&config).expect("merged active config is missing");
+    let config_text = String::from_utf8_lossy(&config_before_update);
+    assert!(
+        config_text.contains("replace_owned") && config_text.contains("merge_owned"),
+        "setup did not establish both aliases' config keys:\n{config_text}"
+    );
+
+    fs::write(
+        first_topology.join("agent/config.yml"),
+        "replace_owned:\n  value: updated\n",
+    )
+    .expect("failed to update replace-owned topology config");
+    let target_before = file_snapshot(&agent_dir);
+    let state_root = temp.state_home().join("omp-topology");
+    let state_before = file_snapshot(&state_root);
+
+    let rejected = run(
+        &temp,
+        &["update", "--alias", "replace-owner", "--config-replace"],
+    );
+    assert!(
+        !rejected.status.success(),
+        "replace update removed a disjoint config key owned by alias 'merge-owner':\n{}",
+        output_text(&rejected)
+    );
+    let report = output_text(&rejected);
+    assert!(
+        report.contains("merge-owner") && report.contains("merge_owned"),
+        "replace collision did not identify the sibling alias and owned key:\n{report}"
+    );
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        target_before,
+        "rejected replace update changed target files or config"
+    );
+    assert_eq!(
+        fs::read(&config).expect("rejected replace update removed active config"),
+        config_before_update
+    );
+    assert_eq!(
+        file_snapshot(&state_root),
+        state_before,
+        "rejected replace update changed registry or ownership manifests"
+    );
+    let dry_run = run(
+        &temp,
+        &[
+            "update",
+            "--alias",
+            "replace-owner",
+            "--config-replace",
+            "--dry-run",
+        ],
+    );
+    assert!(!dry_run.status.success());
+    assert!(output_text(&dry_run).contains("merge-owner"));
+    assert_eq!(
+        file_snapshot(&agent_dir),
+        target_before,
+        "dry-run replace refusal changed target files or config"
+    );
+    assert_eq!(
+        file_snapshot(&state_root),
+        state_before,
+        "dry-run replace refusal changed registry or ownership manifests"
+    );
+    assert_eq!(
+        json_document(&run(&temp, &["status", "--alias", "merge-owner", "--json"]))["manifest"],
+        "healthy"
     );
 }
 
