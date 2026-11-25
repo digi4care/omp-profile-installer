@@ -8,11 +8,11 @@
 
 CLI parsing and orchestration in `src/main.rs` resolve a topology source (`src/source.rs`), validate its manifest and overlay (`src/topology.rs`), resolve the target profile (`src/profiles.rs`), then plan and apply filesystem changes (`src/install.rs` / `src/remove.rs`). Ownership manifests in `src/state.rs` support safe removal; `src/registry.rs` stores alias/source metadata. `src/update.rs` and `src/status.rs` use this state for refresh and freshness checks.
 
-Important invariants: installation plans before mutation and rejects collisions; apply rechecks live files and rolls back failures. Removal preserves user edits. Filesystem operations reject symlinks and use descriptor-anchored operations in `src/anchored/`, the only scoped `unsafe` boundary. External processes are invoked with argv, not shell strings. Keep JSON output to one document on stdout; errors go to stderr.
+Important invariants: installation plans before mutation and rejects collisions; apply rechecks live files and rolls back failures. Removal preserves user edits. The installer rejects symlinked components in managed paths and uses descriptor-anchored filesystem operations in `src/anchored.rs`, the only scoped `unsafe` boundary. External processes are invoked with argv, not shell strings. Keep JSON output to one document on stdout; errors go to stderr.
 
 ## Key Directories
 
-- `src/` — CLI and installer implementation; `src/anchored/` contains anchored filesystem operations and their tests.
+- `src/` — CLI and installer implementation; `src/anchored.rs` implements anchored filesystem operations, with tests in `src/anchored/tests.rs`.
 - `tests/` — end-to-end CLI, installer contract, and regression suites.
 - `topologies/<slug>/` — topology manifest, `agent/` payload, README, and changelog. The source tree is the catalog; no separate index is required.
 - `scripts/` — Rust quality gate and signed-release installer.
@@ -35,7 +35,7 @@ docker compose exec rust ./scripts/rust-gates.sh
 docker compose down
 ```
 
-Focused installer tests: `cargo test --locked --test installer`. Run locally with `cargo run --locked -- list --json`; dry-run an install with `cargo run --locked -- install -t <slug> --dry-run --agent-dir "$(mktemp -d)/agent"` (target directory basename must be `agent`). Release builds use `cargo build --release --locked --target <target>`.
+Focused installer tests: `cargo test --locked --test installer`. Run locally with `cargo run --locked -- list --json`; dry-run an install with `cargo run --locked -- install -t <slug> --dry-run --agent-dir "$(mktemp -d)/agent"`. The default alias is derived from the lowercased `--agent-dir` basename and must match `[a-z0-9][a-z0-9-]{0,63}`; use `--alias` to override. Release builds use `cargo build --release --locked --target <target>`.
 
 ## Code Conventions & Common Patterns
 
