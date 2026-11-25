@@ -208,8 +208,10 @@ pub struct CrossAliasOwnership {
     pub candidate_owner: Option<String>,
     /// Agent-dir-relative file → owning alias.
     pub files: BTreeMap<String, String>,
-    /// Skills-root-relative file → owning alias.
-    pub skills_files: BTreeMap<String, String>,
+    /// Recorded skills root → skills-root-relative file → owning alias.
+    /// The same relative path under a different skills root is a
+    /// different file, so lookups must carry the root.
+    pub skills_files: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// Collect the ownership every other registered alias for `agent_dir`
@@ -250,14 +252,34 @@ pub fn cross_alias_ownership(
         if other.get("config_candidate_sha256").is_some() {
             ownership.candidate_owner = Some(alias.clone());
         }
-        for (key, target) in [
-            ("files", &mut ownership.files),
-            ("skills_files", &mut ownership.skills_files),
-        ] {
-            if let Some(entries) = other.get(key).and_then(Json::as_object) {
-                for rel in entries.keys() {
-                    target.entry(rel.clone()).or_insert_with(|| alias.clone());
-                }
+        if let Some(entries) = other.get("files").and_then(Json::as_object) {
+            for rel in entries.keys() {
+                ownership
+                    .files
+                    .entry(rel.clone())
+                    .or_insert_with(|| alias.clone());
+            }
+        }
+        if let Some(entries) = other.get("skills_files").and_then(Json::as_object)
+            && !entries.is_empty()
+        {
+            // Skill files are located relative to the sibling's own
+            // recorded skills root; without it they cannot be compared
+            // against this install's targets, so fail closed rather
+            // than match them against every root.
+            let root = other
+                .get("skills_dir")
+                .and_then(Json::as_str)
+                .filter(|dir| !dir.is_empty())
+                .ok_or_else(|| {
+                    CliError::Manifest(format!(
+                        "alias '{alias}' records skills files but no \
+                         'skills_dir' root; refusing to act on it"
+                    ))
+                })?;
+            let owned = ownership.skills_files.entry(root.to_string()).or_default();
+            for rel in entries.keys() {
+                owned.entry(rel.clone()).or_insert_with(|| alias.clone());
             }
         }
     }

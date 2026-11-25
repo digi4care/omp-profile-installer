@@ -162,6 +162,51 @@ fn refuse_config_type_conflicts(topo_model: &Value, user_model: &Value) -> Resul
     Ok(())
 }
 
+/// Replace mode swaps the whole active config for the verbatim topology
+/// bytes, so every config key a sibling alias owns — disjoint from this
+/// topology's config or not — is overwritten or removed. Fail closed;
+/// merge mode is the way to share a config between aliases.
+fn refuse_replace_over_sibling_ownership(
+    cross_alias: &registry::CrossAliasOwnership,
+    agent_dir: &Path,
+) -> Result<(), CliError> {
+    if let Some((leaf, owner)) = cross_alias.config_installed.iter().next() {
+        return Err(CliError::Usage(format!(
+            "refusing to install: config key '{}' is already managed by \
+             alias '{owner}' for {}; --config-replace replaces the whole \
+             active config and would remove it (use --config-merge to share \
+             the config, or remove that alias first)",
+            leaf.join("."),
+            agent_dir.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Read-only preflight for a replace-mode install or update: refuse when
+/// the topology ships a config whose verbatim replacement of the active
+/// config would overwrite or remove config keys a sibling alias owns.
+/// `update` stages a Partial registry entry before `run` repeats this
+/// check under the lock, so it must refuse here for the update to leave
+/// both the registry and the target untouched; `run` still re-checks
+/// under the lock so ownership recorded in between fails closed. A
+/// symlinked or absent topology config plans no replacement (`run`
+/// refuses the symlink with its own wording), so there is nothing a
+/// sibling could lose.
+pub fn preflight_replace_ownership(
+    topology_dir: &Path,
+    state_anchor: &Path,
+    agent_dir: &Path,
+    manifest_path: &Path,
+) -> Result<(), CliError> {
+    let topo_config_path = topology_dir.join("agent").join(yamlwork::CONFIG_NAME);
+    if fsx::is_symlink(&topo_config_path) || read_source_config(&topo_config_path)?.is_none() {
+        return Ok(());
+    }
+    let cross_alias = registry::cross_alias_ownership(state_anchor, agent_dir, manifest_path)?;
+    refuse_replace_over_sibling_ownership(&cross_alias, agent_dir)
+}
+
 /// Read-only preflight for `cmd_install`: refuse incompatible config
 /// types before the caller acquires the registry lock, which creates the
 /// state home — a visible side effect a refused install must not leave
@@ -401,6 +446,7 @@ pub fn preflight_target_links(
     }
     if let Some(root) = &skills_root {
         let skills_pin = open_skills_pin(root)?;
+        let root_string = root.display().to_string();
         for rel in skill_sources.keys() {
             let target = root.join(rel);
             let symlinked = match &skills_pin {
@@ -431,7 +477,11 @@ pub fn preflight_target_links(
             // Read for the same io-error parity `run` keeps before the
             // ownership decision.
             let _current = bytes;
-            if let Some(owner) = cross_alias.skills_files.get(rel) {
+            if let Some(owner) = cross_alias
+                .skills_files
+                .get(&root_string)
+                .and_then(|files| files.get(rel))
+            {
                 collisions.push(format!(
                     "{rel} already exists under skills root '{}' and is \
                      managed by alias '{owner}'; refusing to overwrite it",
@@ -846,6 +896,7 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
         None => None,
     };
     if let Some(root) = &skills_root {
+        let root_string = root.display().to_string();
         for rel in skill_sources.keys() {
             let target = root.join(rel);
             let symlinked = match &skills_pin {
@@ -878,7 +929,11 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
             };
             let current_hash = fsx::sha256_hex(&current);
             if !owned_skill_files.contains(rel) {
-                if let Some(owner) = cross_alias.skills_files.get(rel) {
+                if let Some(owner) = cross_alias
+                    .skills_files
+                    .get(&root_string)
+                    .and_then(|files| files.get(rel))
+                {
                     // Sibling alias already manages this skill file: a
                     // collision naming the owner, even for byte-identical
                     // bytes — there is no shared file ownership.
@@ -1244,6 +1299,12 @@ pub fn run(opts: &InstallOptions, out: &mut Vec<String>) -> Result<i32, CliError
             // so remove can restore them (only while the active config
             // still matches the recorded replacement).
             if let Some(raw) = &topo_config_raw {
+                // Replace swaps the whole active config, so a config key
+                // a sibling alias owns — even one disjoint from this
+                // topology's config — is overwritten or removed. Fail
+                // closed before planning the replacement; merge mode is
+                // the way to share a config between aliases.
+                refuse_replace_over_sibling_ownership(&cross_alias, &agent_dir)?;
                 planned_replace = Some(raw.clone());
                 replace_replaced_hash = Some(fsx::sha256_hex(raw));
                 replace_backup_text = original_config

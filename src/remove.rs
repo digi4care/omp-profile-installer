@@ -315,6 +315,10 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
         Some(recorded) => PathBuf::from(recorded),
         None => agent_dir.clone(),
     };
+    // Cross-alias ownership lookups carry the recorded root: the same
+    // relative path under another alias's skills root is a different
+    // file, not something this remove may release or preserve.
+    let recorded_root_key = recorded_skills_dir.as_deref().unwrap_or("");
     // Pin the agent directory and the OMP profiles/agent trees for the
     // whole removal, plus the recorded skills root: every read, re-verify,
     // and mutation below re-walks from these descriptors, so a swapped-in
@@ -465,7 +469,11 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
         // A path a sibling alias still owns is released without touching
         // target bytes (only reachable from a corrupt double-ownership
         // manifest; the installer refuses to record one).
-        if cross_alias.skills_files.contains_key(rel) {
+        if cross_alias
+            .skills_files
+            .get(recorded_root_key)
+            .is_some_and(|files| files.contains_key(rel))
+        {
             released_files.push(rel.clone());
             continue;
         }
@@ -776,7 +784,11 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
             // Never snapshot (and therefore never roll back) paths a
             // sibling alias owns: restoring our stale copy would
             // overwrite the sibling's file.
-            if cross_alias.skills_files.contains_key(rel) {
+            if cross_alias
+                .skills_files
+                .get(recorded_root_key)
+                .is_some_and(|files| files.contains_key(rel))
+            {
                 continue;
             }
             let target = skills_root.join(rel);
