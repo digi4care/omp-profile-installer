@@ -1070,6 +1070,97 @@ fn split_skills_root_is_recorded_and_used_for_removal() {
 }
 
 #[test]
+fn install_dry_run_accepts_legacy_config_file_existed_boolean() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
+    let config = agent_dir.join("config.yml");
+    fs::write(&config, b"task:\n  eager: never\n  local_setting: keep\n")
+        .expect("failed to seed config.yml");
+
+    let installed = run_cli(
+        &temp,
+        &agent_dir,
+        &["install", "-t", TOPOLOGY, "--config-merge"],
+    );
+    assert_success(&installed);
+
+    let manifest = manifest_path(&temp, &agent_dir);
+    let ownership: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).expect("ownership manifest is missing"))
+            .expect("ownership manifest is not valid JSON");
+    assert_eq!(ownership["topology_version"], "2.0.0");
+    assert!(
+        ownership["config"]["prior"].is_object() && ownership["config"]["installed"].is_object(),
+        "fixture lacks valid current config ownership"
+    );
+
+    let edited_config = b"task:\n  eager: never\n  local_setting: keep\n";
+    fs::write(&config, edited_config).expect("failed to edit config.yml");
+
+    // Match the legacy single-root manifest shape while retaining the
+    // complete current file ownership inventory from the setup install.
+    let legacy_manifest = serde_json::json!({
+        "version": 1,
+        "topology": TOPOLOGY,
+        "topology_version": "2.0.0",
+        "files": ownership["files"].clone(),
+        "created_dirs": ownership["created_dirs"].clone(),
+        "config": {
+            "file_existed": true,
+            "prior": ownership["config"]["prior"].clone(),
+            "installed": ownership["config"]["installed"].clone(),
+        }
+    });
+    let legacy_manifest_bytes = serde_json::to_vec_pretty(&legacy_manifest)
+        .expect("failed to serialize legacy ownership manifest");
+    fs::write(&manifest, &legacy_manifest_bytes).expect("failed to write legacy manifest");
+
+    let manifest_before = fs::read(&manifest).expect("failed to read legacy manifest");
+    let agent_files_before: Vec<_> = files_under(&agent_dir)
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(&path).expect("failed to snapshot installed agent file");
+            (path, bytes)
+        })
+        .collect();
+    let candidate = agent_dir.join("config.yml.new");
+    assert!(
+        !candidate.exists(),
+        "test fixture unexpectedly contains a config candidate"
+    );
+
+    let dry_run = run_cli(
+        &temp,
+        &agent_dir,
+        &["install", "-t", TOPOLOGY, "--dry-run", "--config-merge"],
+    );
+    assert_success(&dry_run);
+    assert_eq!(
+        fs::read(&config).expect("config.yml disappeared during dry-run"),
+        edited_config.as_slice(),
+        "dry-run changed the user-edited config"
+    );
+    assert!(!candidate.exists(), "dry-run published a config candidate");
+    assert_eq!(
+        fs::read(&manifest).expect("legacy manifest disappeared during dry-run"),
+        manifest_before,
+        "dry-run changed the legacy ownership manifest"
+    );
+    let agent_files_after: Vec<_> = files_under(&agent_dir)
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(&path).expect("failed to read installed agent file");
+            (path, bytes)
+        })
+        .collect();
+    assert_eq!(
+        agent_files_after, agent_files_before,
+        "dry-run changed installed agent files"
+    );
+}
+
+#[test]
 fn remove_accepts_legacy_single_root_manifest() {
     let temp = TestDir::new();
     let agent_dir = temp.0.join("agent");
@@ -1098,8 +1189,8 @@ fn remove_accepts_legacy_single_root_manifest() {
   }},
   "created_dirs": ["skills", "skills/marketing-charter"],
   "config": {{
-    "prior": {{ "[\"task\",\"eager\"]": {{ "value": "never" }} }},
-    "installed": {{ "[\"task\",\"eager\"]": {{ "value": "always" }} }}
+    "prior": {{ "[\"task\", \"eager\"]": {{ "value": "never" }} }},
+    "installed": {{ "[\"task\", \"eager\"]": {{ "value": "always" }} }}
   }}
 }}
 "#

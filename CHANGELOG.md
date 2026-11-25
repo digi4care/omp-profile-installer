@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-25
+
+### Fixed
+
+- Accept the legacy boolean `config.file_existed` manifest field while
+  preserving current ownership validation and user-edited configuration.
+
 ## [0.2.1] - 2026-11-25
 
 ### Fixed
