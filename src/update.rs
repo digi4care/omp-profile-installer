@@ -94,12 +94,21 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
         ))
     })?;
 
+    // The ownership manifest this alias owns: a per-alias manifest when
+    // several aliases share the agent directory, else the legacy default.
+    let manifest_path = state::manifest_path_for_slot(
+        &entry.agent_dir,
+        opts.state_anchor,
+        opts.alias,
+        entry.manifest_slot,
+    )?;
+
     // Fail closed on a mismatched manifest before any --ref validation,
     // status resolution (which may hit the network), or source checkout:
     // the manifest would make install refuse mid-transaction anyway, and
     // nothing may be written first. A missing manifest is reinstall-safe
     // and proceeds; an unreadable manifest errors out of load_manifest.
-    let manifest_name = manifest_topology(&entry, opts.state_anchor)?;
+    let manifest_name = manifest_topology(&manifest_path, opts.state_anchor)?;
     // A missing manifest is reinstall-safe: the install below
     // recreates it together with the managed files and config.
     let manifest_missing = manifest_name.is_none();
@@ -232,6 +241,8 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
                 skills_dir: None,
                 dry_run: true,
                 config_mode: opts.config_mode,
+                manifest_path: Some(&manifest_path),
+                alias: Some(opts.alias),
             },
             &mut install_out,
         ) {
@@ -274,6 +285,9 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
     // source pin/digest changes.
     intended.installed_at = entry.installed_at.clone();
     intended.state = registry::InstallState::Partial;
+    // The ownership slot is immutable across an update: a per-alias
+    // manifest stays per-alias, the legacy manifest stays legacy.
+    intended.manifest_slot = entry.manifest_slot;
 
     // Hold the registry lock across the entire target mutation so a
     // concurrent retarget or remove cannot interleave with the reinstall.
@@ -382,6 +396,8 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
             skills_dir: None,
             dry_run: false,
             config_mode: opts.config_mode,
+            manifest_path: Some(&manifest_path),
+            alias: Some(opts.alias),
         },
         &mut install_out,
     ) {
@@ -555,17 +571,17 @@ fn prune_source_cache(
     }
 }
 
-/// The topology name recorded in the target's ownership manifest, if a
+/// The topology name recorded in the given ownership manifest, if a
 /// manifest exists. Purely local and read-only — this is the same probe
 /// `status::manifest_status` performs, split out so update can refuse a
 /// mismatched manifest before any network or cache activity. A missing
 /// manifest yields `None` (reinstall-safe); an unreadable manifest is a
-/// hard error from `state::load_manifest`.
+/// hard error from `state::load_manifest_at`.
 fn manifest_topology(
-    entry: &RegistryEntry,
+    manifest_path: &Path,
     state_anchor: &Path,
 ) -> Result<Option<String>, CliError> {
-    let Some(manifest) = state::load_manifest(&entry.agent_dir, state_anchor)? else {
+    let Some(manifest) = state::load_manifest_at(manifest_path, state_anchor)? else {
         return Ok(None);
     };
     Ok(topology::manifest_topology(&manifest).map(str::to_string))

@@ -157,6 +157,12 @@ pub struct RegistryEntry {
     pub installed_at: String,
     /// Installed/partial lifecycle state.
     pub state: InstallState,
+    /// Which ownership manifest this alias owns (`state::ManifestSlot`).
+    /// The first alias targeting an agent directory owns the legacy
+    /// `manifest.json`; every additional alias for the same directory
+    /// owns its per-alias `manifests/<alias>.json`, so ownership state
+    /// is never shared between aliases.
+    pub manifest_slot: state::ManifestSlot,
 }
 
 impl RegistryEntry {
@@ -181,8 +187,81 @@ impl RegistryEntry {
             overlay_digest,
             installed_at: fsx::timestamp(),
             state: InstallState::Installed,
+            // Callers installing an additional alias for a directory that
+            // already has one set [`state::ManifestSlot::PerAlias`].
+            manifest_slot: state::ManifestSlot::Legacy,
         }
     }
+}
+
+/// Ownership that OTHER aliases hold over a shared agent directory, read
+/// from their own manifests: the config keys they installed, the
+/// `config.yml.new` publication, and the files/skills they own. An
+/// install, update, or remove for one alias must fail closed before
+/// writing, owning, restoring, or deleting anything recorded here —
+/// there is no shared ownership, even for byte-identical content.
+#[derive(Debug, Default)]
+pub struct CrossAliasOwnership {
+    /// Config leaf → owning alias, from every other alias's manifest.
+    pub config_installed: BTreeMap<Vec<String>, String>,
+    /// Alias recording ownership of `config.yml.new`, if any.
+    pub candidate_owner: Option<String>,
+    /// Agent-dir-relative file → owning alias.
+    pub files: BTreeMap<String, String>,
+    /// Skills-root-relative file → owning alias.
+    pub skills_files: BTreeMap<String, String>,
+}
+
+/// Collect the ownership every other registered alias for `agent_dir`
+/// records in its own manifest, skipping the manifest at
+/// `own_manifest_path` (the caller's). Missing manifests contribute
+/// nothing; unreadable or invalid ones fail closed.
+pub fn cross_alias_ownership(
+    state_anchor: &Path,
+    agent_dir: &Path,
+    own_manifest_path: &Path,
+) -> Result<CrossAliasOwnership, CliError> {
+    let mut ownership = CrossAliasOwnership::default();
+    let registry_doc = load_registry(state_anchor)?;
+    for (alias, entry) in &registry_doc.aliases {
+        if entry.agent_dir != agent_dir {
+            continue;
+        }
+        let other_path =
+            state::manifest_path_for_slot(agent_dir, state_anchor, alias, entry.manifest_slot)?;
+        if other_path == own_manifest_path {
+            continue;
+        }
+        let Some(other) = state::load_manifest_at(&other_path, state_anchor)? else {
+            continue;
+        };
+        let config = other.get("config").cloned().unwrap_or(Json::Null);
+        for parts in config
+            .get("installed")
+            .map(state::decode_values)
+            .unwrap_or_default()
+            .into_keys()
+        {
+            ownership
+                .config_installed
+                .entry(parts)
+                .or_insert_with(|| alias.clone());
+        }
+        if other.get("config_candidate_sha256").is_some() {
+            ownership.candidate_owner = Some(alias.clone());
+        }
+        for (key, target) in [
+            ("files", &mut ownership.files),
+            ("skills_files", &mut ownership.skills_files),
+        ] {
+            if let Some(entries) = other.get(key).and_then(Json::as_object) {
+                for rel in entries.keys() {
+                    target.entry(rel.clone()).or_insert_with(|| alias.clone());
+                }
+            }
+        }
+    }
+    Ok(ownership)
 }
 
 /// The versioned registry document: a deterministically sorted alias map.
@@ -220,6 +299,19 @@ impl Registry {
     ) -> Result<(), CliError> {
         let alias = alias.into();
         validate_alias(&alias)?;
+        if entry.manifest_slot == state::ManifestSlot::Legacy
+            && self.aliases.iter().any(|(other_alias, other)| {
+                other_alias != &alias
+                    && other.agent_dir == entry.agent_dir
+                    && other.manifest_slot == state::ManifestSlot::Legacy
+            })
+        {
+            return Err(fail(format!(
+                "alias '{alias}' cannot own the legacy manifest of '{}' \
+                 (another alias already does)",
+                entry.agent_dir.display()
+            )));
+        }
         self.aliases.insert(alias, entry);
         Ok(())
     }
@@ -377,23 +469,43 @@ pub fn with_registry<T>(
 /// The marker is a private state file (atomic temp-file + rename,
 /// owner-only permissions) named [`RECOVERY_MARKER`] inside the snapshot
 /// directory, written descriptor-relative below a pinned snapshot-root
-/// descriptor.
-pub fn mark_recovery_snapshot(snapshot_dir: &Path) -> Result<(), CliError> {
+/// descriptor. When the failing operation belongs to a registry alias the
+/// marker content records it, so a successful run of a *different* alias
+/// sharing the agent directory never clears this alias's only rollback
+/// data; an alias-less operation writes the legacy untagged content.
+pub fn mark_recovery_snapshot(snapshot_dir: &Path, alias: Option<&str>) -> Result<(), CliError> {
     let marker = snapshot_dir.join(RECOVERY_MARKER);
     let root =
         RootFd::open_or_create_private(snapshot_dir).map_err(|err| io_err(snapshot_dir, err))?;
-    root.write_private(
-        RECOVERY_MARKER,
-        b"retained: recovery required after incomplete rollback\n",
-    )
-    .map_err(|err| io_err(&marker, err))
+    let content = match alias {
+        Some(alias) => {
+            format!("retained: recovery required after incomplete rollback (alias '{alias}')\n")
+        }
+        None => "retained: recovery required after incomplete rollback\n".to_string(),
+    };
+    root.write_private(RECOVERY_MARKER, content.as_bytes())
+        .map_err(|err| io_err(&marker, err))
 }
 
-/// Remove every regular, non-symlink [`RECOVERY_MARKER`] file inside the
-/// agent's snapshot directories, returning the number of markers removed.
-/// Call only after the operation that left recovery markers behind has
-/// fully reconciled; while any marker remains, [`prune_snapshots`] keeps
-/// the marked snapshots.
+/// Marker-content tag recording which alias a recovery marker belongs to.
+fn marker_alias_tag(alias: &str) -> String {
+    format!("(alias '{alias}')")
+}
+
+/// Remove [`RECOVERY_MARKER`] files inside the agent's snapshot
+/// directories, returning the number of markers removed. Call only after
+/// the operation that left recovery markers behind has fully reconciled;
+/// while any marker remains, [`prune_snapshots`] keeps the marked
+/// snapshots.
+///
+/// Several aliases may share one agent directory, so clearing is scoped:
+/// `alias` selects markers whose content tags that alias, and
+/// `include_untagged` additionally selects legacy markers with no alias
+/// tag — pass it only for the operation that owns the legacy per-agent
+/// manifest (or for an alias-less operation), never for an additional
+/// per-alias install, so one alias's success cannot destroy a sibling
+/// alias's only rollback data. A marker whose content cannot be read is
+/// conservatively left in place.
 ///
 /// The same name and real-directory rules as [`prune_snapshots`] apply:
 /// only exact `install-<timestamp>` / `remove-<timestamp>` directories under
@@ -401,11 +513,17 @@ pub fn mark_recovery_snapshot(snapshot_dir: &Path) -> Result<(), CliError> {
 /// never followed, and a marker that exists but is not a regular
 /// non-symlink file (symlink, directory, device) is conservatively left in
 /// place, so the snapshot stays protected.
-pub fn clear_recovery_snapshots(agent_dir: &Path, state_anchor: &Path) -> Result<usize, CliError> {
+pub fn clear_recovery_snapshots(
+    agent_dir: &Path,
+    state_anchor: &Path,
+    alias: Option<&str>,
+    include_untagged: bool,
+) -> Result<usize, CliError> {
     let state = state::agent_state_dir(agent_dir, state_anchor)?;
     let Some(root) = strict_state_root(&state)? else {
         return Ok(0);
     };
+    let tag = alias.map(marker_alias_tag);
     let mut cleared = 0usize;
     for (_, rel) in snapshot_rels(&root)? {
         let marker_rel = format!("{rel}/{RECOVERY_MARKER}");
@@ -416,11 +534,33 @@ pub fn clear_recovery_snapshots(agent_dir: &Path, state_anchor: &Path) -> Result
             Some(EntryKind::File) => {}
             _ => continue,
         }
+        let content = match root.read_file(&marker_rel) {
+            Ok(Some(bytes)) => bytes,
+            // An unreadable marker keeps its snapshot protected.
+            _ => continue,
+        };
+        let tagged = tag
+            .as_ref()
+            .is_some_and(|tag| contains_bytes(&content, tag.as_bytes()));
+        let untagged = !content
+            .windows(b"(alias '".len())
+            .any(|window| window == b"(alias '");
+        if !(tagged || (include_untagged && untagged)) {
+            continue;
+        }
         root.remove_file(&marker_rel)
             .map_err(|err| io_err(&marker, err))?;
         cleared += 1;
     }
     Ok(cleared)
+}
+
+/// `true` when `haystack` contains `needle` as a contiguous byte run.
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 /// Enumerate the real snapshot directories of the pinned agent state
@@ -583,6 +723,22 @@ fn registry_from_json(data: &Json) -> Result<Registry, CliError> {
         let entry = entry_from_json(alias, value)?;
         aliases.insert(alias.clone(), entry);
     }
+    // Fail closed on a corrupt document: the legacy manifest of one agent
+    // directory can only be owned by one alias (per-alias manifests are
+    // unique by construction, so only `Legacy` slots need this check).
+    let mut legacy_owner: BTreeMap<&Path, &str> = BTreeMap::new();
+    for (alias, entry) in &aliases {
+        if entry.manifest_slot != state::ManifestSlot::Legacy {
+            continue;
+        }
+        if let Some(other) = legacy_owner.insert(&entry.agent_dir, alias) {
+            return Err(fail(format!(
+                "aliases '{other}' and '{alias}' both claim the legacy \
+                 manifest of '{}'",
+                entry.agent_dir.display()
+            )));
+        }
+    }
     Ok(Registry { version, aliases })
 }
 
@@ -633,6 +789,7 @@ fn entry_from_json(alias: &str, value: &Json) -> Result<RegistryEntry, CliError>
             "overlay_digest",
             "installed_at",
             "state",
+            "manifest",
         ],
         &format!("entry '{alias}'"),
     )?;
@@ -668,12 +825,24 @@ fn entry_from_json(alias: &str, value: &Json) -> Result<RegistryEntry, CliError>
         )));
     }
     let installed_at = require_str(obj, "installed_at", alias)?.to_string();
-    let state = match require_str(obj, "state", alias)? {
+    let install_state = match require_str(obj, "state", alias)? {
         "installed" => InstallState::Installed,
         "partial" => InstallState::Partial,
         other => {
             return Err(fail(format!(
                 "entry '{alias}' has unsupported state '{other}'"
+            )));
+        }
+    };
+    // Registries written before multiple aliases per agent directory
+    // existed carry no 'manifest' field; those entries own the legacy
+    // per-agent manifest.
+    let manifest_slot = match optional_str(obj, "manifest", alias)?.as_deref() {
+        None | Some("legacy") => state::ManifestSlot::Legacy,
+        Some("per-alias") => state::ManifestSlot::PerAlias,
+        Some(other) => {
+            return Err(fail(format!(
+                "entry '{alias}' has unsupported manifest '{other}'"
             )));
         }
     };
@@ -686,7 +855,8 @@ fn entry_from_json(alias: &str, value: &Json) -> Result<RegistryEntry, CliError>
         resolved_commit,
         overlay_digest,
         installed_at,
-        state,
+        state: install_state,
+        manifest_slot,
     })
 }
 
@@ -718,6 +888,15 @@ fn entry_to_json(entry: &RegistryEntry) -> Result<Json, CliError> {
         "state".to_string(),
         Json::String(entry.state.as_str().to_string()),
     );
+    // Only the non-default slot is written: legacy entries stay
+    // byte-identical to registries written before multiple aliases per
+    // agent directory existed.
+    if entry.manifest_slot == state::ManifestSlot::PerAlias {
+        obj.insert(
+            "manifest".to_string(),
+            Json::String("per-alias".to_string()),
+        );
+    }
     Ok(Json::Object(obj))
 }
 
@@ -862,6 +1041,7 @@ mod tests {
                     overlay_digest: None,
                     installed_at: "2026-01-02T03:04:05.000000".to_string(),
                     state: InstallState::Installed,
+                    manifest_slot: state::ManifestSlot::Legacy,
                 },
             )
             .expect("valid test alias");

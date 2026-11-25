@@ -144,6 +144,50 @@ pub fn manifest_path(agent_dir: &Path, repo_root: &Path) -> Result<PathBuf, CliE
     Ok(agent_state_dir(agent_dir, repo_root)?.join("manifest.json"))
 }
 
+/// Which ownership manifest an install alias owns.
+///
+/// The first alias targeting an agent directory keeps the legacy
+/// per-agent `manifest.json` (the only manifest that existed before
+/// multiple aliases per directory were supported, so every pre-existing
+/// registry entry owns it). Every additional alias for the same
+/// directory owns a per-alias manifest, so aliases never share
+/// ownership state and update/remove of one alias cannot touch another
+/// alias's files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestSlot {
+    /// The legacy per-agent `manifest.json`.
+    Legacy,
+    /// The alias's own `manifests/<alias>.json`.
+    PerAlias,
+}
+
+/// The per-alias ownership manifest path for `alias`:
+/// `<agent-state-dir>/manifests/<alias>.json`. The registry alias
+/// grammar (`registry::validate_alias`: `[a-z0-9][a-z0-9-]{0,63}`) makes
+/// the file name a safe single path component.
+pub fn alias_manifest_path(
+    agent_dir: &Path,
+    repo_root: &Path,
+    alias: &str,
+) -> Result<PathBuf, CliError> {
+    Ok(agent_state_dir(agent_dir, repo_root)?
+        .join("manifests")
+        .join(format!("{alias}.json")))
+}
+
+/// The ownership-manifest path an alias owns under `slot`.
+pub fn manifest_path_for_slot(
+    agent_dir: &Path,
+    repo_root: &Path,
+    alias: &str,
+    slot: ManifestSlot,
+) -> Result<PathBuf, CliError> {
+    match slot {
+        ManifestSlot::Legacy => manifest_path(agent_dir, repo_root),
+        ManifestSlot::PerAlias => alias_manifest_path(agent_dir, repo_root, alias),
+    }
+}
+
 /// Load and validate the ownership manifest; `None` when none exists.
 /// Symlinks and any existing non-regular object are rejected rather than
 /// followed or silently treated as absent. The `config` ownership section
@@ -152,7 +196,24 @@ pub fn manifest_path(agent_dir: &Path, repo_root: &Path) -> Result<PathBuf, CliE
 /// read as license to clobber user config.
 pub fn load_manifest(agent_dir: &Path, repo_root: &Path) -> Result<Option<Json>, CliError> {
     let path = manifest_path(agent_dir, repo_root)?;
+    load_manifest_at(&path, repo_root)
+}
+
+/// [`load_manifest`] for an explicit manifest path (a per-alias manifest
+/// or the legacy default). The path must live under the XDG state root.
+pub fn load_manifest_at(path: &Path, repo_root: &Path) -> Result<Option<Json>, CliError> {
     let root_path = state_root(repo_root)?;
+    let rel = path
+        .strip_prefix(&root_path)
+        .map_err(|_| {
+            CliError::Manifest(format!(
+                "ownership manifest '{}' is outside the state root '{}'",
+                path.display(),
+                root_path.display()
+            ))
+        })?
+        .to_string_lossy()
+        .into_owned();
     // Pin the state root with the no-symlink-root policy: the agent
     // directory is a configured root, so a symlink swapped in at it
     // fails closed here instead of redirecting the manifest read.
@@ -169,9 +230,7 @@ pub fn load_manifest(agent_dir: &Path, repo_root: &Path) -> Result<Option<Json>,
     let Some(root) = root else {
         return Ok(None);
     };
-    let key = percent_encode(agent_dir.as_os_str().as_bytes(), PYTHON_QUOTE).to_string();
-    let rel = format!("{key}/manifest.json");
-    match root.kind(&rel).map_err(|err| io_err(&path, err))? {
+    match root.kind(&rel).map_err(|err| io_err(path, err))? {
         None => return Ok(None),
         Some(EntryKind::Symlink) => {
             return Err(CliError::Manifest(format!(
@@ -192,8 +251,8 @@ pub fn load_manifest(agent_dir: &Path, repo_root: &Path) -> Result<Option<Json>,
     // being followed.
     let bytes = root
         .read_file(&rel)
-        .map_err(|err| io_err(&path, err))?
-        .ok_or_else(|| io_err(&path, std::io::Error::from(std::io::ErrorKind::NotFound)))?;
+        .map_err(|err| io_err(path, err))?
+        .ok_or_else(|| io_err(path, std::io::Error::from(std::io::ErrorKind::NotFound)))?;
     let text = String::from_utf8(bytes).map_err(|err| {
         CliError::Manifest(format!(
             "ownership manifest '{}' is unreadable: {err}",
@@ -215,10 +274,10 @@ pub fn load_manifest(agent_dir: &Path, repo_root: &Path) -> Result<Option<Json>,
                 .unwrap_or_else(|| "none".to_string())
         )));
     }
-    validate_config(&data, &path)?;
-    validate_config_modes(&data, &path)?;
-    validate_symlinks(&data, &path)?;
-    validate_preexisting(&data, &path)?;
+    validate_config(&data, path)?;
+    validate_config_modes(&data, path)?;
+    validate_symlinks(&data, path)?;
+    validate_preexisting(&data, path)?;
     Ok(Some(data))
 }
 
@@ -258,14 +317,15 @@ fn validate_config_modes(manifest: &Json, path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Reject a malformed `preexisting` section rather than letting it decode
-/// as absence. The section must be an array of safe relative string
-/// paths, each one already recorded as a key under `files` — exactly the
-/// shape the installer writes when it adopts a byte-identical file behind
-/// a supported main->topology link. Anything else (a non-array section,
-/// non-string or unsafe-path entries, or keys with no matching `files`
-/// record) fails closed before any command mutates state; manifests
-/// without the section (written before adoption existed) stay valid.
+/// Reject a malformed `preexisting` section rather than letting it
+/// decode as absence. The section must be an array of safe relative
+/// string paths, each one already recorded as a key under `files` —
+/// exactly the shape the installer writes when it adopts a byte-identical
+/// file behind a supported main->topology link. Anything else (a
+/// non-array section, non-string or unsafe-path entries, or keys with no
+/// matching `files` record) fails closed before any command mutates
+/// state; manifests without the section (written before adoption
+/// existed) stay valid.
 fn validate_preexisting(manifest: &Json, path: &Path) -> Result<(), CliError> {
     let Some(items) = manifest.get("preexisting") else {
         return Ok(());
@@ -415,14 +475,32 @@ pub fn serialize_manifest(manifest: &Json) -> Vec<u8> {
 /// pinned once and the write is descriptor-relative below it, so a
 /// swapped-in symlink inside the state tree fails closed instead of being
 /// followed.
+#[cfg(test)]
 pub fn write_manifest(agent_dir: &Path, repo_root: &Path, manifest: &Json) -> Result<(), CliError> {
     let path = manifest_path(agent_dir, repo_root)?;
+    write_manifest_at(&path, repo_root, manifest)
+}
+
+/// [`write_manifest`] for an explicit manifest path (a per-alias manifest
+/// or the legacy default). The path must live under the XDG state root;
+/// missing parents (e.g. the per-alias `manifests/` directory) are
+/// created owner-only.
+pub fn write_manifest_at(path: &Path, repo_root: &Path, manifest: &Json) -> Result<(), CliError> {
     let root_path = state_root(repo_root)?;
+    let rel = path
+        .strip_prefix(&root_path)
+        .map_err(|_| {
+            CliError::Manifest(format!(
+                "ownership manifest '{}' is outside the state root '{}'",
+                path.display(),
+                root_path.display()
+            ))
+        })?
+        .to_string_lossy()
+        .into_owned();
     let root = RootFd::open_or_create_private(&root_path).map_err(|err| io_err(&root_path, err))?;
-    let key = percent_encode(agent_dir.as_os_str().as_bytes(), PYTHON_QUOTE).to_string();
-    let rel = format!("{key}/manifest.json");
     root.write_private(&rel, &serialize_manifest(manifest))
-        .map_err(|err| io_err(&path, err))
+        .map_err(|err| io_err(path, err))
 }
 
 /// Encode leaf values for the manifest: `None` records `{"absent": true}`,

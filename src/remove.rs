@@ -39,6 +39,13 @@ pub struct RemoveOptions<'a> {
     pub agent_dir: Option<&'a str>,
     pub skills_dir: Option<&'a str>,
     pub dry_run: bool,
+    /// Ownership manifest this removal owns (a per-alias manifest when
+    /// several aliases share the agent directory). `None` uses the
+    /// legacy default `manifest.json`.
+    pub manifest_path: Option<&'a Path>,
+    /// Alias being removed, when invoked through one. Scopes recovery
+    /// markers so a sibling alias's rollback snapshot is never cleared.
+    pub alias: Option<&'a str>,
 }
 
 type PathKey = Vec<String>;
@@ -76,6 +83,7 @@ fn incomplete_rollback_error(
     manifest_state: &str,
     snapshot_dir: &Path,
     report: &RollbackReport,
+    alias: Option<&str>,
 ) -> CliError {
     let mut msg = format!(
         "{context}; rollback is INCOMPLETE — the recovery snapshot at {} \
@@ -96,7 +104,7 @@ fn incomplete_rollback_error(
     }
     msg.push_str(&format!("\n  manifest state: {manifest_state}"));
     msg.push_str("; restore the listed paths from the snapshot, then retry remove");
-    if let Err(marker_exc) = registry::mark_recovery_snapshot(snapshot_dir) {
+    if let Err(marker_exc) = registry::mark_recovery_snapshot(snapshot_dir, alias) {
         msg.push_str(&format!(
             "\nwarning: could not mark the retained snapshot as \
              recovery-required; ordinary retention may delete it: \
@@ -176,6 +184,12 @@ fn valid_skills_root(raw: &str) -> bool {
 pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError> {
     let state_anchor = opts.state_anchor;
     let agent_dir = resolve_agent_dir(opts.agent_dir)?;
+    // The ownership manifest this removal owns: a per-alias manifest when
+    // several aliases share the agent directory, else the legacy default.
+    let manifest_path = match opts.manifest_path {
+        Some(path) => path.to_path_buf(),
+        None => state::manifest_path(&agent_dir, state_anchor)?,
+    };
     // Serialize against other state-mutating commands before reading the
     // ownership manifest: a remove that planned from a manifest another
     // remove already deleted would resurrect a stale manifest (or roll
@@ -188,7 +202,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
     } else {
         Some(registry::RegistryLock::acquire(state_anchor)?)
     };
-    let manifest = match state::load_manifest(&agent_dir, state_anchor)? {
+    let manifest = match state::load_manifest_at(&manifest_path, state_anchor)? {
         Some(manifest) => manifest,
         None => {
             if opts.dry_run {
@@ -215,6 +229,11 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
             opts.topology
         )));
     }
+
+    // Ownership recorded by sibling aliases of this agent directory:
+    // paths and config keys they still own are released from this
+    // manifest without being deleted or restored.
+    let cross_alias = registry::cross_alias_ownership(state_anchor, &agent_dir, &manifest_path)?;
 
     let mut manifest = manifest;
     let owned_files = validated_file_map(&manifest, "files")?;
@@ -413,6 +432,12 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
             released_files.push(rel.clone());
             continue;
         }
+        // A sibling alias still owning this path keeps it: release our
+        // ownership record without touching target bytes.
+        if cross_alias.files.contains_key(rel) {
+            released_files.push(rel.clone());
+            continue;
+        }
         let resolved =
             symlinks::resolve_owned_at(&roots, rel, opts.topology, recorded_links.get(rel))?;
         let target = resolved.resolved().to_path_buf();
@@ -437,6 +462,13 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
     let mut removed_skill_files: Vec<String> = Vec::new();
     let mut missing_skill_files: Vec<String> = Vec::new();
     for (rel, recorded) in &skill_files {
+        // A path a sibling alias still owns is released without touching
+        // target bytes (only reachable from a corrupt double-ownership
+        // manifest; the installer refuses to record one).
+        if cross_alias.skills_files.contains_key(rel) {
+            released_files.push(rel.clone());
+            continue;
+        }
         let target = skills_root.join(rel);
         if !exists_under(&skills_pin, rel) {
             missing_skill_files.push(rel.clone());
@@ -466,6 +498,11 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
         // instead of scanning the growing restored list.
         let mut restored_set: HashSet<PathKey> = HashSet::new();
         for parts in sorted_installed {
+            // A sibling alias still owns this key: leave the live value
+            // untouched and simply drop it from this manifest.
+            if cross_alias.config_installed.contains_key(parts) {
+                continue;
+            }
             let shadowed = (1..parts.len()).any(|depth| restored_set.contains(&parts[..depth]));
             if shadowed {
                 continue;
@@ -717,7 +754,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
             snapshot_write(yamlwork::CONFIG_NAME, original)?;
         }
         for rel in owned_files.keys() {
-            if preexisting.contains(rel) {
+            if preexisting.contains(rel) || cross_alias.files.contains_key(rel) {
                 continue;
             }
             let target = owned_resolved
@@ -736,6 +773,12 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
             snapshot_write(CONFIG_NEW_NAME, &data)?;
         }
         for rel in skill_files.keys() {
+            // Never snapshot (and therefore never roll back) paths a
+            // sibling alias owns: restoring our stale copy would
+            // overwrite the sibling's file.
+            if cross_alias.skills_files.contains_key(rel) {
+                continue;
+            }
             let target = skills_root.join(rel);
             if exists_under(&skills_pin, rel) && !symlink_under(&skills_pin, rel) {
                 let data = read_under(&skills_pin, rel, &target)?
@@ -1155,9 +1198,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
                 "remove failed and changes were rolled back: {exc}"
             )));
         }
-        let manifest_display = state::manifest_path(&agent_dir, state_anchor)
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "<unresolvable>".to_string());
+        let manifest_display = manifest_path.display().to_string();
         return Err(incomplete_rollback_error(
             &format!("remove failed: {exc}"),
             &format!(
@@ -1166,6 +1207,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
             ),
             &snapshot_dir,
             &report,
+            opts.alias,
         ));
     }
 
@@ -1376,15 +1418,13 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
         if replace_restore.is_some() {
             manifest_obj.remove("config_replace");
         }
-        if let Err(exc) = state::write_manifest(&agent_dir, state_anchor, &manifest) {
+        if let Err(exc) = state::write_manifest_at(&manifest_path, state_anchor, &manifest) {
             // Commit failed after the file/config mutations succeeded.
             // The manifest write is atomic, so the pre-remove manifest on
             // disk is still intact and authoritative: rolling the
             // file/config changes back returns to a consistent state from
             // which a retry is safe.
-            let manifest_display = state::manifest_path(&agent_dir, state_anchor)
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| "<unresolvable>".to_string());
+            let manifest_display = manifest_path.display().to_string();
             let report = rollback_from_snapshot();
             if report.is_complete() {
                 let _ = state_pin.remove_tree(&snapshot_prefix);
@@ -1405,6 +1445,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
                 ),
                 &snapshot_dir,
                 &report,
+                opts.alias,
             ));
         }
         for line in &conflicts {
@@ -1416,7 +1457,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
         out.push(format!(
             "partially removed '{}'; ownership manifest kept at {} for retry",
             opts.topology,
-            state::manifest_path(&agent_dir, state_anchor)?.display()
+            manifest_path.display()
         ));
         // Prune old snapshots after the successful mutation only; a prune
         // failure must never roll back or fail the removal, so it surfaces
@@ -1429,7 +1470,6 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
         return Ok(0);
     }
 
-    let manifest_path = state::manifest_path(&agent_dir, state_anchor)?;
     let manifest_rel = manifest_path
         .strip_prefix(&state_dir)
         .expect("the ownership manifest path is always under the state dir")
@@ -1464,6 +1504,7 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
             ),
             &snapshot_dir,
             &report,
+            opts.alias,
         ));
     }
     out.push(format!(
@@ -1478,11 +1519,19 @@ pub fn run(opts: &RemoveOptions, out: &mut Vec<String>) -> Result<i32, CliError>
     // released only now: this remove fully completed (no preserved
     // conflicts and the manifest is gone), so a later successful
     // reconciliation has run for every retained snapshot. A partial
-    // remove above must not reach this. Clearing happens before ordinary
-    // pruning — marked snapshots survive until a clean reconciliation
-    // clears them. Like pruning, a clear failure must never fail the
-    // removal, so it surfaces as a warning line.
-    if let Err(exc) = registry::clear_recovery_snapshots(&agent_dir, state_anchor) {
+    // remove above must not reach this. Only this alias's markers (and,
+    // for the legacy-manifest owner, pre-alias unscoped markers) are
+    // cleared; a sibling alias's recovery snapshot stays pinned. Clearing
+    // happens before ordinary pruning — marked snapshots survive until a
+    // clean reconciliation clears them. Like pruning, a clear failure
+    // must never fail the removal, so it surfaces as a warning line.
+    let owns_legacy_manifest = manifest_path == state::manifest_path(&agent_dir, state_anchor)?;
+    if let Err(exc) = registry::clear_recovery_snapshots(
+        &agent_dir,
+        state_anchor,
+        opts.alias,
+        owns_legacy_manifest,
+    ) {
         out.push(format!("warning: could not clear recovery markers: {exc}"));
     }
     // Prune old snapshots after the successful mutation only; a prune
