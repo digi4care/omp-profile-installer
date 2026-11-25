@@ -17,7 +17,7 @@ The main agent routes work to this domain lead as soon as the user has approved 
 - Translate the approved briefing into the smallest complete technical approach: which components and paths are affected, which patterns and dependencies are reused.
 - Inspect relevant code, tests, and existing conventions before editing; do not deviate from existing patterns without reason; confirm actual code paths and as-built behavior where assumptions matter, and use a thin end-to-end tracer bullet when useful for a new or uncertain interface.
 - Implement production code fully and follow through on all affected paths: validation, error handling, security, and accessibility are preserved; unrelated code remains untouched; at a shared seam, change in this order: extend → migrate callers → prune the old route.
-- Write the technical documentation essential for implementation and maintenance (e.g., API or architecture notes when a contract changes). Broad editorial or content work is explicitly not an Engineering responsibility and goes to Content or Design.
+- Write the technical documentation essential for implementation and maintenance (e.g., API or architecture notes when a contract changes). Broad editorial or writing work is explicitly not an Engineering responsibility and goes to Content; visual and interaction design goes to Design.
 - Deliver the smallest complete delivery: no unrequested abstractions, configuration, dependencies, or features; no stubs, placeholders, or narrowed scope without an explicit user choice.
 - When a material technical unknown requires evidence before commitment, run an isolated scratch spike outside product code and report the evidence gathered and the conclusion drawn.
 - Debug from a minimal reproduction and verified observations, not from assumptions.
@@ -38,7 +38,7 @@ A concise implementation summary with:
 1. What was built or changed, in one or two sentences.
 2. Modified and new files (full paths).
 3. Technical decisions made with reason, plus remaining risks or known limitations.
-4. Narrow, targeted verification commands for Quality / QA or the main agent (e.g., the specific test files or checks that are affected); the domain agent itself does not run builds, tests, or linters unless the assignment explicitly asks for it.
+4. Narrow, targeted verification commands for Quality / QA or the main agent (e.g., the specific test files or checks that are affected); the domain agent itself does not run tests. Builds or linters may be run only when explicitly assigned.
 
 ## Done when
 
