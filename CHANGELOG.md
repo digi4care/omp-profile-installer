@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [0.2.7] - 2026-11-25
+
+### Added
+
+- Explain alias/profile independence and add collision-specific recovery guidance for separate profiles and registered-alias updates.
+- Add persistent Docker Compose Rust gates with named Cargo caches and focused CLI workflow regressions.
+
+### Fixed
+
+- Clarify that registered-alias updates retain their existing topology and never install the newly requested topology.
+- Distinguish topology manifests from registry aliases in human-readable status output.
+
 ## [0.2.6] - 2026-11-25
 
 ### Added
