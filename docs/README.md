@@ -6,6 +6,11 @@ design records and dossiers do **not** live here — they belong under
 
 ## Contents
 
+- [`installer.md`](installer.md) — how the installer works: topologies,
+  registry aliases, profiles, and agent directories; the install/update/
+  status/list/remove lifecycle; dry runs; source, ref, and exact-version
+  selection; the alias name preflight; ownership collisions; and
+  troubleshooting.
 - [`topology-readme-template.md`](topology-readme-template.md) — the required
   starting point for the README of every new topology. See the
   [Adding a topology](../CONTRIBUTING.md#adding-a-topology) section of

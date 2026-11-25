@@ -656,6 +656,46 @@ fn parse_semver(raw: &str) -> Result<semver::Version, String> {
     })
 }
 
+/// Find an executable regular file named exactly `alias` on PATH without
+/// spawning a process: a launcher with the alias's name would shadow (or be
+/// shadowed by) the alias the user just chose. Symlinks resolving to an
+/// executable regular file count; directories, non-executable files,
+/// unreadable candidates, and an absent PATH do not. The first match in
+/// PATH order is returned.
+#[cfg(unix)]
+fn path_executable_collision(alias: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(alias);
+        // `metadata` follows symlinks, so a link to an executable regular
+        // file collides too; dangling links and unreadable entries fail and
+        // are ignored. Executability is decided by permission bits, the
+        // supported targets being Linux and macOS.
+        let Ok(metadata) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn path_executable_collision(_alias: &str) -> Option<PathBuf> {
+    None
+}
+
+/// The refusal for a new alias whose name is already an executable on PATH.
+fn path_collision_error(alias: &str, colliding: &Path) -> CliError {
+    CliError::Usage(format!(
+        "alias '{alias}' collides with the executable '{}' already on \
+         PATH; choose another --alias (for example 'omp-{alias}')",
+        colliding.display()
+    ))
+}
+
 fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     require_source_for_ref(&args.source, &args.reference)?;
     let anchor = state_anchor()?;
@@ -665,6 +705,38 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
         registry::validate_alias(alias)?;
     } else if let Some(profile) = args.profile.as_deref() {
         registry::validate_alias(&profile.to_ascii_lowercase())?;
+    }
+    // Load the registry before target resolution so the new-alias PATH
+    // preflight below can refuse a colliding alias before
+    // `profiles::resolve_target` runs `omp --profile NAME config path`,
+    // which creates a missing profile directory.
+    let registry_doc = registry::load_registry(&anchor)?;
+    // The alias is derivable before target resolution unless it defaults
+    // from an explicit --agent-dir basename (that resolution is
+    // non-mutating, so its preflight runs after resolution below). The
+    // profile-derived defaults match `default_alias`: the explicit or
+    // ambient profile name lowercased.
+    let pre_alias: Option<String> = match &args.alias {
+        Some(alias) => Some(alias.clone()),
+        None => match args.profile.as_deref() {
+            Some(profile) => Some(profile.to_ascii_lowercase()),
+            None if args.agent_dir.is_none() => {
+                let alias = profiles::active_profile_name().to_ascii_lowercase();
+                registry::validate_alias(&alias)?;
+                Some(alias)
+            }
+            None => None,
+        },
+    };
+    // A *new* alias must not collide with an executable already on PATH:
+    // refuse before target resolution, source resolution, cache creation,
+    // or any state or target mutation. A reinstall under an existing alias
+    // is an upsert and is never re-checked.
+    if let Some(alias) = pre_alias.as_deref()
+        && registry_doc.get(alias).is_none()
+        && let Some(colliding) = path_executable_collision(alias)
+    {
+        return Err(path_collision_error(alias, &colliding));
     }
     // --profile and --agent-dir are mutually exclusive (checked inside);
     // an alias-only invocation targets the ambient profile. A dry run is
@@ -691,18 +763,28 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     // manifests/<alias>.json, so ownership state is never shared between
     // aliases.
     registry::validate_alias(&alias)?;
-    let registry_doc = registry::load_registry(&anchor)?;
     if let Some(existing) = registry_doc.get(&alias)
         && (existing.agent_dir != target.agent_dir || existing.topology != args.topology)
     {
         return Err(CliError::Usage(format!(
             "alias '{alias}' is already registered for '{}' in {}; it \
-             cannot be reused for '{}' in {}",
+             cannot be reused for '{}' in {}. To update the existing \
+             alias, rerun install with its registered topology and \
+             target; otherwise choose another --alias",
             existing.topology,
             existing.agent_dir.display(),
             args.topology,
             target.agent_dir.display()
         )));
+    }
+    // The same PATH preflight for an alias that only became known with the
+    // resolved target (the explicit --agent-dir default); aliases already
+    // preflighted above are not re-checked.
+    if pre_alias.as_deref() != Some(alias.as_str())
+        && registry_doc.get(&alias).is_none()
+        && let Some(colliding) = path_executable_collision(&alias)
+    {
+        return Err(path_collision_error(&alias, &colliding));
     }
     let manifest_slot = manifest_slot_for(&registry_doc, &alias, &target.agent_dir);
 
@@ -826,7 +908,9 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
         {
             let exc = CliError::Usage(format!(
                 "alias '{alias}' is already registered for '{}' in {}; it \
-                 cannot be reused for '{}' in {}",
+                 cannot be reused for '{}' in {}. To update the existing \
+                 alias, rerun install with its registered topology and \
+                 target; otherwise choose another --alias",
                 existing.topology,
                 existing.agent_dir.display(),
                 args.topology,
