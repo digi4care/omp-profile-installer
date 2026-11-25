@@ -58,7 +58,7 @@ installer-compatible and understandable to humans and agents:
      # topology's config is published as config.yml.new (created as the
      # active config.yml only when none exists). Add --config-merge or
      # --config-replace here if the dry-run should exercise those modes.
-     # The /agent basename matters: the default registry alias is the
+     # The /agent basename matters: the default install ID is the
      # lowercased basename of the agent directory and must match
      # [a-z0-9][a-z0-9-]{0,63}, which a bare mktemp basename (dots,
      # uppercase letters) violates.
@@ -93,8 +93,8 @@ compares versions; it reports source commit/digest freshness.)
   version and its signed releases move independently of every topology
   version; never couple a topology bump to a CLI release.
 - **Verify the update path when it changes.** If a PR changes versioning,
-  update, or source-selection behavior, verify `update` against an alias
-  that already exists in a real registry — `update --alias <existing>`
+  update, or source-selection behavior, verify `update` against an install
+  ID that already exists in a real registry — `update --install-id <existing>`
   does not create installs. Run `--dry-run` first, inspect the plan, then
   run the real update, and report both under the PR's Verification section.
 
@@ -159,7 +159,7 @@ For PRs that change a topology's payload or metadata, the description must also 
 
 - **Version bumped.** `topologies/<name>/topology.yml` `version` was bumped per SemVer (`major`/`minor`/`patch`) for every topology whose files changed.
 - **Changelog entry added.** `topologies/<name>/CHANGELOG.md` has a dated section for the new version describing the actual change — no invented features.
-- **Update verified.** If the PR touches versioning, update, or source-selection behavior, `update --alias <existing-alias>` was run against a real existing alias — `--dry-run` first, then the real update — with the observed results reported under Verification.
+- **Update verified.** If the PR touches versioning, update, or source-selection behavior, `update --install-id <existing-install-id>` was run against a real existing install — `--dry-run` first, then the real update — with the observed results reported under Verification.
 
 ## Review and merging
 

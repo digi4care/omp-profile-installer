@@ -234,14 +234,45 @@ fn run_install_from_source_with_path(
     path: &Path,
 ) -> Output {
     let source = source.to_str().expect("local source path is not UTF-8");
+    let profile = "path-preflight";
+    let omp_log = temp.0.join("omp-invocations.log");
+    let alias_marker = temp.0.join("omp-alias-created");
+    let fake_omp = path.join("omp");
+    fs::write(
+        &fake_omp,
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$OMP_TEST_OMP_LOG\"\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"config\" ] && [ \"$4\" = \"path\" ]; then\n\
+         \tprintf '%s\\n' \"$OMP_TEST_PROFILE_AGENT_DIR\"\n\
+         \texit 0\n\
+         fi\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"--alias\" ]; then\n\
+         \t: > \"$OMP_TEST_ALIAS_MARKER\"\n\
+         \texit 0\n\
+         fi\n\
+         exit 64\n",
+    )
+    .expect("failed to write fake omp");
+    fs::set_permissions(&fake_omp, fs::Permissions::from_mode(0o755))
+        .expect("failed to make fake omp executable");
     let mut command = cli_command(temp, Path::new(env!("CARGO_MANIFEST_DIR")));
     command
         .args([
-            "install", "-t", TOPOLOGY, "--source", source, "--alias", alias,
+            "install",
+            "-t",
+            TOPOLOGY,
+            "--source",
+            source,
+            "--profile",
+            profile,
+            "--alias",
+            alias,
         ])
-        .arg("--agent-dir")
-        .arg(agent_dir)
-        .env("PATH", path);
+        .env("PATH", path)
+        .env("OMP_TEST_PROFILE", profile)
+        .env("OMP_TEST_PROFILE_AGENT_DIR", agent_dir)
+        .env("OMP_TEST_OMP_LOG", omp_log)
+        .env("OMP_TEST_ALIAS_MARKER", alias_marker);
     if dry_run {
         command.arg("--dry-run");
     }
@@ -328,6 +359,10 @@ fn installer_alias_preflight_refuses_path_executable_before_mutation() {
         !temp.state_home().exists(),
         "collision refusal created installer state"
     );
+    assert!(
+        !temp.0.join("omp-invocations.log").exists(),
+        "PATH collision preflight invoked OMP before refusing the shell alias"
+    );
 }
 
 #[cfg(unix)]
@@ -368,6 +403,10 @@ fn installer_alias_preflight_refuses_path_executable_during_dry_run() {
         !temp.state_home().exists(),
         "dry-run collision refusal created installer state"
     );
+    assert!(
+        !temp.0.join("omp-invocations.log").exists(),
+        "PATH collision dry-run preflight invoked OMP before refusing the shell alias"
+    );
 }
 
 #[cfg(unix)]
@@ -395,12 +434,12 @@ fn installer_alias_preflight_allows_non_executable_path_file() {
     );
     let registry: serde_json::Value = serde_json::from_slice(
         &fs::read(temp.state_home().join("omp-topology/registry.json"))
-            .expect("successful install did not register its alias"),
+            .expect("successful install did not register its profile install ID"),
     )
     .expect("registry is not valid JSON");
     assert!(
-        registry["aliases"]["teddy"].is_object(),
-        "successful install did not register alias 'teddy'"
+        registry["aliases"]["path-preflight"].is_object(),
+        "successful install did not register its profile install ID"
     );
 }
 
@@ -428,66 +467,138 @@ fn installer_alias_preflight_allows_distinct_alias_when_other_executable_exists(
     );
     let registry: serde_json::Value = serde_json::from_slice(
         &fs::read(temp.state_home().join("omp-topology/registry.json"))
-            .expect("successful install did not register its alias"),
+            .expect("successful install did not register its profile install ID"),
     )
     .expect("registry is not valid JSON");
     assert!(
-        registry["aliases"]["omp-teddy"].is_object(),
-        "successful install did not register distinct alias 'omp-teddy'"
+        registry["aliases"]["path-preflight"].is_object(),
+        "successful install did not register the profile install ID"
     );
     assert!(
         registry["aliases"]["teddy"].is_null(),
-        "install registered the unrelated executable name instead of the requested alias"
+        "install registered the unrelated executable name instead of the profile install ID"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn installer_alias_preflight_ignores_executable_for_same_registered_alias() {
+fn installer_same_install_id_upsert_allows_alias_matching_path_executable() {
     let temp = TestDir::new();
     let path_dir = create_path_dir(&temp);
+    let profile = "path-install-id";
+    let agent_dir = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile)
+        .join("agent");
     let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
-    let agent_dir = temp.0.join("agent");
+    let source = source.to_str().expect("source path is not UTF-8");
+    let omp_log = temp.0.join("omp-invocations.log");
+    let alias_marker = temp.0.join("omp-alias-created");
+    let fake_omp = path_dir.join("omp");
+    fs::write(
+        &fake_omp,
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$OMP_TEST_OMP_LOG\"\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"config\" ] && [ \"$4\" = \"path\" ]; then\n\
+         \tprintf '%s\\n' \"$OMP_TEST_PROFILE_AGENT_DIR\"\n\
+         \texit 0\n\
+         fi\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"--alias\" ]; then\n\
+         \t: > \"$OMP_TEST_ALIAS_MARKER\"\n\
+         \texit 0\n\
+         fi\n\
+         exit 64\n",
+    )
+    .expect("failed to write fake omp");
+    fs::set_permissions(&fake_omp, fs::Permissions::from_mode(0o755))
+        .expect("failed to make fake omp executable");
 
-    let first =
-        run_install_from_source_with_path(&temp, &agent_dir, &source, "teddy", false, &path_dir);
+    let first = cli_command(&temp, Path::new(env!("CARGO_MANIFEST_DIR")))
+        .args([
+            "install",
+            "-t",
+            TOPOLOGY,
+            "--source",
+            source,
+            "--profile",
+            profile,
+            "--install-id",
+            "teddy",
+        ])
+        .env("PATH", &path_dir)
+        .env("OMP_TEST_PROFILE", profile)
+        .env("OMP_TEST_PROFILE_AGENT_DIR", &agent_dir)
+        .env("OMP_TEST_OMP_LOG", &omp_log)
+        .env("OMP_TEST_ALIAS_MARKER", &alias_marker)
+        .output()
+        .expect("failed to create the existing install ID");
     assert_success(&first);
     let target_before = file_snapshot(&agent_dir);
     let state_before = file_snapshot(&temp.state_home());
     add_path_executable(&path_dir, "teddy");
 
-    let second =
-        run_install_from_source_with_path(&temp, &agent_dir, &source, "teddy", false, &path_dir);
+    let second = cli_command(&temp, Path::new(env!("CARGO_MANIFEST_DIR")))
+        .args([
+            "install",
+            "-t",
+            TOPOLOGY,
+            "--source",
+            source,
+            "--profile",
+            profile,
+            "--install-id",
+            "teddy",
+            "--alias",
+            "teddy",
+            "--dry-run",
+        ])
+        .env("PATH", &path_dir)
+        .env("OMP_TEST_PROFILE", profile)
+        .env("OMP_TEST_PROFILE_AGENT_DIR", &agent_dir)
+        .env("OMP_TEST_OMP_LOG", &omp_log)
+        .env("OMP_TEST_ALIAS_MARKER", &alias_marker)
+        .output()
+        .expect("failed to dry-run the same-install-ID upsert");
     assert_success(&second);
     assert_eq!(
         file_snapshot(&agent_dir),
         target_before,
-        "reinstall of the existing alias changed target files"
+        "dry-run re-upsert changed target files"
     );
     assert_eq!(
         file_snapshot(&temp.state_home()),
         state_before,
-        "reinstall of the existing alias changed installer state"
+        "dry-run re-upsert changed installer state"
+    );
+    let invocations = fs::read_to_string(&omp_log).expect("OMP invocation log is missing");
+    let expected_config_path = format!("--profile {profile} config path");
+    assert!(
+        !invocations.is_empty()
+            && invocations
+                .lines()
+                .all(|invocation| invocation == expected_config_path),
+        "re-upsert invoked OMP shell-alias creation or another unexpected command:\n{invocations}"
+    );
+    assert!(
+        !alias_marker.exists(),
+        "dry-run re-upsert created the shell alias"
     );
 }
-
 #[cfg(unix)]
 #[test]
-fn installer_alias_preflight_rejects_registered_alias_without_mutation() {
+fn installer_install_id_collision_refuses_another_target_without_mutation() {
     let temp = TestDir::new();
-    let path_dir = create_path_dir(&temp);
     let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
     let existing_agent_dir = temp.0.join("existing-agent");
     let requested_agent_dir = temp.0.join("requested-agent");
-    let alias = "registered-teddy";
+    let install_id = "registered-teddy";
 
-    let initial = run_install_from_source_with_path(
+    let initial = install_from_source(
         &temp,
         &existing_agent_dir,
         &source,
-        alias,
-        false,
-        &path_dir,
+        &["--install-id", install_id],
     );
     assert_success(&initial);
     let registry_path = temp.state_home().join("omp-topology/registry.json");
@@ -495,24 +606,22 @@ fn installer_alias_preflight_rejects_registered_alias_without_mutation() {
     let state_before = file_snapshot(&temp.state_home());
     let target_before = file_snapshot(&existing_agent_dir);
 
-    let output = run_install_from_source_with_path(
+    let output = install_from_source(
         &temp,
         &requested_agent_dir,
         &source,
-        alias,
-        false,
-        &path_dir,
+        &["--install-id", install_id],
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "install reused an alias already mapped to another target\nstdout:\n{}\nstderr:\n{}",
+        "install reused an ID already mapped to another target\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         stderr
     );
     assert!(
-        stderr.contains(alias) && stderr.to_ascii_lowercase().contains("already registered"),
-        "registry collision error did not identify the registered alias:\n{stderr}"
+        stderr.contains(install_id) && stderr.to_ascii_lowercase().contains("already registered"),
+        "registry collision error did not identify the install ID:\n{stderr}"
     );
     assert_eq!(
         fs::read(&registry_path).expect("registry disappeared after collision refusal"),
@@ -535,12 +644,12 @@ fn installer_alias_preflight_rejects_registered_alias_without_mutation() {
     );
     let lower = stderr.to_ascii_lowercase();
     assert!(
-        (lower.contains("update") && lower.contains("existing alias"))
+        (lower.contains("update") && lower.contains("existing install"))
             || lower.contains("choose another")
             || lower.contains("choose a different")
             || lower.contains("use another")
             || lower.contains("use a different"),
-        "registry collision error did not direct the user to update the existing alias or choose another:\n{stderr}"
+        "registry collision error did not direct the user to update the existing install or choose another:\n{stderr}"
     );
 }
 #[cfg(unix)]
@@ -637,6 +746,223 @@ fn installer_alias_preflight_refuses_before_named_profile_resolution() {
             && !state_home_exists
             && !registry_exists,
         "collision preflight had side effects: omp_invoked={omp_invoked}, omp_log={omp_log_contents:?}, omp_root_exists={omp_root_exists}, profiles_root_exists={profiles_root_exists}, target_exists={target_exists}, state_home_exists={state_home_exists}, registry_exists={registry_exists}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_alias_invokes_omp_after_registering_topology() {
+    let temp = TestDir::new();
+    let profile = "demo";
+    let agent_dir = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile)
+        .join("agent");
+    let source = local_named_topology_source(
+        &temp,
+        "source",
+        "alpha",
+        "fixture: true\n",
+        &[("payload.txt", b"installed alpha")],
+    );
+    let source = source.to_str().expect("local source path is not UTF-8");
+    let bin_dir = temp.0.join("fake-omp-bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create fake PATH");
+    let fake_omp = bin_dir.join("omp");
+    let invocation_log = temp.0.join("omp-invocations.log");
+    let alias_marker = temp.0.join("omp-alias-created");
+    fs::write(
+        &fake_omp,
+        "#!/bin/sh\n\
+         printf 'call' >> \"$OMP_TEST_OMP_LOG\"\n\
+         for arg in \"$@\"; do printf '\\t<%s>' \"$arg\" >> \"$OMP_TEST_OMP_LOG\"; done\n\
+         printf '\\n' >> \"$OMP_TEST_OMP_LOG\"\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"config\" ] && [ \"$4\" = \"path\" ]; then\n\
+         \tprintf '%s\\n' \"$OMP_TEST_PROFILE_AGENT_DIR\"\n\
+         \texit 0\n\
+         fi\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"--alias\" ] && [ \"$4\" = \"omp-demo\" ]; then\n\
+         \t[ -f \"$OMP_TEST_INSTALLED_FILE\" ] || exit 65\n\
+         \t: > \"$OMP_TEST_ALIAS_MARKER\"\n\
+         \texit 0\n\
+         fi\n\
+         exit 64\n",
+    )
+    .expect("failed to write fake omp");
+    fs::set_permissions(&fake_omp, fs::Permissions::from_mode(0o755))
+        .expect("failed to make fake omp executable");
+    let output = cli_command(&temp, Path::new(env!("CARGO_MANIFEST_DIR")))
+        .args([
+            "install",
+            "--topology",
+            "alpha",
+            "--source",
+            source,
+            "--profile",
+            profile,
+            "--alias",
+            "omp-demo",
+        ])
+        .env("PATH", &bin_dir)
+        .env("OMP_TEST_PROFILE", profile)
+        .env("OMP_TEST_PROFILE_AGENT_DIR", &agent_dir)
+        .env("OMP_TEST_INSTALLED_FILE", agent_dir.join("payload.txt"))
+        .env("OMP_TEST_ALIAS_MARKER", &alias_marker)
+        .env("OMP_TEST_OMP_LOG", &invocation_log)
+        .output()
+        .expect("failed to execute installer with named profile");
+    assert_success(&output);
+    assert_eq!(
+        fs::read(agent_dir.join("payload.txt")).expect("topology payload was not installed"),
+        b"installed alpha"
+    );
+
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry_path).expect("registry is missing"))
+            .expect("registry is not valid JSON");
+    assert_eq!(
+        registry["aliases"]["demo"]["topology"], "alpha",
+        "registry did not retain the install under its profile-derived install ID"
+    );
+    assert_eq!(
+        registry["aliases"]["demo"]["agent_dir"],
+        fs::canonicalize(&agent_dir)
+            .expect("installed profile target is missing")
+            .display()
+            .to_string(),
+        "registry did not point to the selected profile target"
+    );
+
+    let invocations = fs::read_to_string(&invocation_log)
+        .expect("fake OMP was not invoked")
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        invocations,
+        [
+            "call\t<--profile>\t<demo>\t<config>\t<path>",
+            "call\t<--profile>\t<demo>\t<--alias>\t<omp-demo>",
+        ],
+        "OMP argv/order did not resolve the profile and then create its shell alias"
+    );
+    assert!(
+        alias_marker.is_file(),
+        "fake OMP did not create its marker for the alias invocation"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_id_and_shell_alias_have_independent_roles() {
+    let temp = TestDir::new();
+    let profile = "demo";
+    let agent_dir = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile)
+        .join("agent");
+    let source = local_named_topology_source(
+        &temp,
+        "source",
+        "alpha",
+        "fixture: true\n",
+        &[("payload.txt", b"installed alpha")],
+    );
+    let source = source.to_str().expect("local source path is not UTF-8");
+    let bin_dir = temp.0.join("fake-omp-bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create fake PATH");
+    let fake_omp = bin_dir.join("omp");
+    let invocation_log = temp.0.join("omp-invocations.log");
+    let alias_marker = temp.0.join("omp-alias-created");
+    fs::write(
+        &fake_omp,
+        "#!/bin/sh\n\
+         printf 'call' >> \"$OMP_TEST_OMP_LOG\"\n\
+         for arg in \"$@\"; do printf '\\t<%s>' \"$arg\" >> \"$OMP_TEST_OMP_LOG\"; done\n\
+         printf '\\n' >> \"$OMP_TEST_OMP_LOG\"\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"config\" ] && [ \"$4\" = \"path\" ]; then\n\
+         \tprintf '%s\\n' \"$OMP_TEST_PROFILE_AGENT_DIR\"\n\
+         \texit 0\n\
+         fi\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"--alias\" ] && [ \"$4\" = \"omp-demo\" ]; then\n\
+         \t[ -f \"$OMP_TEST_INSTALLED_FILE\" ] || exit 65\n\
+         \t: > \"$OMP_TEST_ALIAS_MARKER\"\n\
+         \texit 0\n\
+         fi\n\
+         exit 64\n",
+    )
+    .expect("failed to write fake omp");
+    fs::set_permissions(&fake_omp, fs::Permissions::from_mode(0o755))
+        .expect("failed to make fake omp executable");
+    let output = cli_command(&temp, Path::new(env!("CARGO_MANIFEST_DIR")))
+        .args([
+            "install",
+            "--topology",
+            "alpha",
+            "--source",
+            source,
+            "--profile",
+            profile,
+            "--install-id",
+            "internal-demo",
+            "--alias",
+            "omp-demo",
+        ])
+        .env("PATH", &bin_dir)
+        .env("OMP_TEST_PROFILE", profile)
+        .env("OMP_TEST_PROFILE_AGENT_DIR", &agent_dir)
+        .env("OMP_TEST_INSTALLED_FILE", agent_dir.join("payload.txt"))
+        .env("OMP_TEST_ALIAS_MARKER", &alias_marker)
+        .env("OMP_TEST_OMP_LOG", &invocation_log)
+        .output()
+        .expect("failed to execute installer with named profile");
+    assert_success(&output);
+    assert_eq!(
+        fs::read(agent_dir.join("payload.txt")).expect("topology payload was not installed"),
+        b"installed alpha"
+    );
+
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry_path).expect("registry is missing"))
+            .expect("registry is not valid JSON");
+    assert!(
+        registry["aliases"]["internal-demo"].is_object(),
+        "registry did not retain the install under its install ID"
+    );
+    assert!(
+        registry["aliases"].get("omp-demo").is_none(),
+        "shell alias was incorrectly used as a registry key"
+    );
+
+    let invocations = fs::read_to_string(&invocation_log)
+        .expect("fake OMP was not invoked")
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        invocations,
+        [
+            "call\t<--profile>\t<demo>\t<config>\t<path>",
+            "call\t<--profile>\t<demo>\t<--alias>\t<omp-demo>",
+        ],
+        "OMP argv/order did not resolve the profile and then create its shell alias"
+    );
+    assert!(
+        alias_marker.is_file(),
+        "fake OMP did not create its marker for the alias invocation"
+    );
+    let human_output = output_text(&output);
+    assert!(
+        human_output.contains("recorded install ID 'internal-demo'"),
+        "human output did not identify the recorded install ID:\n{human_output}"
+    );
+    assert!(
+        !human_output.contains("recorded alias 'omp-demo'"),
+        "human output identified the shell alias as the recorded install ID:\n{human_output}"
     );
 }
 
@@ -2332,7 +2658,7 @@ fn cli_guidance_overlapping_topology_refusal_preserves_state_and_guides_recovery
             TOPOLOGY,
             "--source",
             source_a,
-            "--alias",
+            "--install-id",
             "omp-dps",
         ],
     );
@@ -2378,7 +2704,7 @@ fn cli_guidance_overlapping_topology_refusal_preserves_state_and_guides_recovery
             "digital-product-studio-plus",
             "--source",
             source_b,
-            "--alias",
+            "--install-id",
             "omp-dps-plus",
         ],
     );
@@ -2403,8 +2729,8 @@ fn cli_guidance_overlapping_topology_refusal_preserves_state_and_guides_recovery
             diagnostics.contains("--profile digital-product-studio-plus"),
         ),
         (
-            "exact existing-alias update command",
-            diagnostics.contains("omp-topology update --alias omp-dps"),
+            "exact existing-install-ID update command",
+            diagnostics.contains("omp-topology update --install-id omp-dps"),
         ),
         (
             "update keeps the existing topology",
@@ -2468,7 +2794,7 @@ fn cli_guidance_symlinked_skills_dir_refusal_has_no_cross_topology_guidance() {
             TOPOLOGY,
             "--source",
             owner_source,
-            "--alias",
+            "--install-id",
             "omp-owner",
         ],
     );
@@ -2503,7 +2829,7 @@ fn cli_guidance_symlinked_skills_dir_refusal_has_no_cross_topology_guidance() {
             "digital-product-studio-plus",
             "--source",
             requested_source,
-            "--alias",
+            "--install-id",
             "omp-requested",
             "--skills-dir",
             skills_link.to_str().expect("skills path is not UTF-8"),
@@ -2525,7 +2851,7 @@ fn cli_guidance_symlinked_skills_dir_refusal_has_no_cross_topology_guidance() {
         "unrelated skills-directory refusal received cross-topology guidance:\n{diagnostics}"
     );
     assert!(
-        !diagnostics.contains("omp-topology update --alias"),
+        !diagnostics.contains("omp-topology update --install-id"),
         "unrelated skills-directory refusal received an update command:\n{diagnostics}"
     );
     assert_eq!(file_snapshot(&default_agent_dir), target_before);
@@ -2534,7 +2860,7 @@ fn cli_guidance_symlinked_skills_dir_refusal_has_no_cross_topology_guidance() {
 
 #[cfg(unix)]
 #[test]
-fn cli_guidance_multi_owner_collision_names_file_owner_alias() {
+fn cli_guidance_multi_owner_collision_names_file_owner_install_id() {
     let temp = TestDir::new();
     let default_agent_dir = temp.0.join("default-agent");
     let profile_agent_dir = temp.0.join("unused-profile-agent");
@@ -2560,7 +2886,7 @@ fn cli_guidance_multi_owner_collision_names_file_owner_alias() {
             "alpha-topology",
             "--source",
             first_source,
-            "--alias",
+            "--install-id",
             "omp-alpha",
         ],
     );
@@ -2587,7 +2913,7 @@ fn cli_guidance_multi_owner_collision_names_file_owner_alias() {
             "beta-topology",
             "--source",
             file_owner_source,
-            "--alias",
+            "--install-id",
             "omp-zeta",
         ],
     );
@@ -2617,7 +2943,7 @@ fn cli_guidance_multi_owner_collision_names_file_owner_alias() {
             "gamma-topology",
             "--source",
             third_source,
-            "--alias",
+            "--install-id",
             "omp-gamma",
         ],
     );
@@ -2633,12 +2959,12 @@ fn cli_guidance_multi_owner_collision_names_file_owner_alias() {
         "refusal did not identify the colliding file:\n{diagnostics}"
     );
     assert!(
-        diagnostics.contains("omp-topology update --alias omp-zeta"),
-        "guidance did not name the alias that owns the colliding file:\n{diagnostics}"
+        diagnostics.contains("omp-topology update --install-id omp-zeta"),
+        "guidance did not name the install ID that owns the colliding file:\n{diagnostics}"
     );
     assert!(
-        !diagnostics.contains("omp-topology update --alias omp-alpha"),
-        "guidance incorrectly named the lexicographically first, non-owning alias:\n{diagnostics}"
+        !diagnostics.contains("omp-topology update --install-id omp-alpha"),
+        "guidance incorrectly named the lexicographically first, non-owning install ID:\n{diagnostics}"
     );
     assert_eq!(file_snapshot(&default_agent_dir), target_before);
     assert_eq!(file_snapshot(&state_root), state_before);
@@ -2670,7 +2996,7 @@ fn cli_guidance_disjoint_topologies_share_target_under_independent_aliases() {
             TOPOLOGY,
             "--source",
             source_a,
-            "--alias",
+            "--install-id",
             "omp-dps",
         ],
     );
@@ -2695,7 +3021,7 @@ fn cli_guidance_disjoint_topologies_share_target_under_independent_aliases() {
             "digital-product-studio-plus",
             "--source",
             source_b,
-            "--alias",
+            "--install-id",
             "omp-dps-plus",
         ],
     );
@@ -2753,7 +3079,7 @@ fn cli_guidance_named_profile_dry_run_preserves_default_state() {
             TOPOLOGY,
             "--source",
             source_a,
-            "--alias",
+            "--install-id",
             "omp-dps",
         ],
     );
@@ -2788,7 +3114,7 @@ fn cli_guidance_named_profile_dry_run_preserves_default_state() {
             source_b,
             "--profile",
             profile_name,
-            "--alias",
+            "--install-id",
             "omp-dps-plus",
             "--dry-run",
         ],
@@ -2821,7 +3147,7 @@ fn cli_guidance_named_profile_dry_run_preserves_default_state() {
 
 #[cfg(unix)]
 #[test]
-fn cli_guidance_status_distinguishes_manifest_from_registry_alias() {
+fn cli_guidance_status_distinguishes_manifest_from_registry_install_id() {
     let temp = TestDir::new();
     let profile_name = "manifest-only";
     let profile_agent_dir = temp
@@ -2848,13 +3174,13 @@ fn cli_guidance_status_distinguishes_manifest_from_registry_alias() {
         .expect("registry aliases are not an object");
     assert!(
         aliases.remove("agent").is_some(),
-        "test setup did not register the expected default alias"
+        "test setup did not register the expected default install ID"
     );
     fs::write(
         &registry_path,
         serde_json::to_vec(&registry).expect("failed to serialize registry fixture"),
     )
-    .expect("failed to remove the test alias registration");
+    .expect("failed to remove the test install ID registration");
     assert!(
         manifest_path(&temp, &profile_agent_dir).is_file(),
         "test setup lost the existing topology manifest"
@@ -2863,7 +3189,7 @@ fn cli_guidance_status_distinguishes_manifest_from_registry_alias() {
         registry["aliases"]
             .as_object()
             .is_some_and(|aliases| aliases.is_empty()),
-        "test setup unexpectedly retained an alias: {registry}"
+        "test setup unexpectedly retained an install ID: {registry}"
     );
 
     let output = run_cli_with_fake_omp(
@@ -2880,8 +3206,8 @@ fn cli_guidance_status_distinguishes_manifest_from_registry_alias() {
         "status did not identify the topology manifest:\n{status}"
     );
     assert!(
-        status.contains("registry alias: none"),
-        "status did not distinguish an absent registry alias:\n{status}"
+        status.contains("registry install ID: none"),
+        "status did not distinguish an absent registry install ID:\n{status}"
     );
     assert!(
         status.contains(&profile_agent_dir.display().to_string()),
@@ -3057,7 +3383,7 @@ fn update_with_version_refreshes_an_existing_recorded_alias() {
     let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"v1")]);
     let alias = "semver-existing";
 
-    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--install-id", alias]);
     assert_success(&installed);
 
     let payload = agent_dir.join("payload.txt");
@@ -3100,7 +3426,7 @@ fn update_with_version_refreshes_an_existing_recorded_alias() {
         &temp,
         &[
             "update",
-            "--alias",
+            "--install-id",
             alias,
             "--dry-run",
             "--version",
@@ -3129,8 +3455,10 @@ fn update_with_version_refreshes_an_existing_recorded_alias() {
         "dry-run changed the installed payload"
     );
 
-    let updated =
-        run_cli_without_agent_dir(&temp, &["update", "--alias", alias, "--version", "1.0.1"]);
+    let updated = run_cli_without_agent_dir(
+        &temp,
+        &["update", "--install-id", alias, "--version", "1.0.1"],
+    );
     assert_success(&updated);
 
     assert_eq!(
@@ -3172,7 +3500,7 @@ fn update_rejects_downgrade_without_explicit_version() {
     )
     .expect("failed to set fixture topology version to 1.1.0");
 
-    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--install-id", alias]);
     assert_success(&installed);
 
     let payload = agent_dir.join("payload.txt");
@@ -3209,7 +3537,7 @@ fn update_rejects_downgrade_without_explicit_version() {
         b"NEW",
         "downgrade fixture changed the payload instead of only topology metadata"
     );
-    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    let updated = run_cli_without_agent_dir(&temp, &["update", "--install-id", alias]);
     let message = output_text(&updated);
     assert!(
         !updated.status.success(),
@@ -3257,7 +3585,7 @@ fn update_without_version_refreshes_metadata_only_local_source() {
         "1.0.0",
     );
     let alias = "semver-metadata-upgrade";
-    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--install-id", alias]);
     assert_success(&installed);
 
     let payload = agent_dir.join("payload.txt");
@@ -3284,7 +3612,7 @@ fn update_without_version_refreshes_metadata_only_local_source() {
     )
     .expect("failed to change only local topology metadata");
 
-    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    let updated = run_cli_without_agent_dir(&temp, &["update", "--install-id", alias]);
     assert_success(&updated);
 
     let updated_manifest: serde_json::Value =
@@ -3320,7 +3648,7 @@ fn update_rejects_invalid_declared_version_without_mutation() {
         "1.0.0",
     );
     let alias = "semver-invalid-metadata-update";
-    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--install-id", alias]);
     assert_success(&installed);
 
     let target_before = file_snapshot(&agent_dir);
@@ -3340,7 +3668,7 @@ fn update_rejects_invalid_declared_version_without_mutation() {
     )
     .expect("failed to set invalid local topology version");
 
-    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    let updated = run_cli_without_agent_dir(&temp, &["update", "--install-id", alias]);
     let message = output_text(&updated);
     assert!(
         !updated.status.success(),
@@ -3377,7 +3705,7 @@ fn update_with_mismatched_version_fails_before_mutation() {
         "1.0.0",
     );
     let alias = "semver-update-mismatch";
-    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--install-id", alias]);
     assert_success(&installed);
 
     let target_before = file_snapshot(&agent_dir);
@@ -3386,8 +3714,10 @@ fn update_with_mismatched_version_fails_before_mutation() {
     let registry_path = temp.state_home().join("omp-topology/registry.json");
     let registry_before = fs::read(&registry_path).expect("registry is missing");
 
-    let updated =
-        run_cli_without_agent_dir(&temp, &["update", "--alias", alias, "--version", "2.0.0"]);
+    let updated = run_cli_without_agent_dir(
+        &temp,
+        &["update", "--install-id", alias, "--version", "2.0.0"],
+    );
     let message = output_text(&updated);
     assert!(
         !updated.status.success(),
@@ -3422,7 +3752,7 @@ fn update_rejects_invalid_declared_source_without_mutation() {
         "1.0.0",
     );
     let alias = "semver-invalid-source-update";
-    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--install-id", alias]);
     assert_success(&installed);
 
     let target_before = file_snapshot(&agent_dir);
@@ -3444,7 +3774,7 @@ fn update_rejects_invalid_declared_source_without_mutation() {
     )
     .expect("failed to change local topology payload");
 
-    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    let updated = run_cli_without_agent_dir(&temp, &["update", "--install-id", alias]);
     let message = output_text(&updated);
     assert!(
         !updated.status.success(),
@@ -3481,7 +3811,7 @@ fn update_rejects_invalid_installed_version_without_mutation() {
         "1.0.0",
     );
     let alias = "semver-invalid-installed-version";
-    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", alias]);
+    let installed = install_from_source(&temp, &agent_dir, &source, &["--install-id", alias]);
     assert_success(&installed);
 
     let manifest_path = manifest_path(&temp, &agent_dir);
@@ -3513,7 +3843,7 @@ fn update_rejects_invalid_installed_version_without_mutation() {
     )
     .expect("failed to change source upgrade payload");
 
-    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    let updated = run_cli_without_agent_dir(&temp, &["update", "--install-id", alias]);
     let message = output_text(&updated);
     assert!(
         !updated.status.success(),
@@ -3793,7 +4123,12 @@ fn config_yaml_default_update_preserves_deleted_config_and_candidate_ownership()
     let agent_dir = temp.0.join("agent");
     fs::create_dir_all(&agent_dir).expect("failed to create isolated agent directory");
     let source = local_topology_source(&temp, "version: first\n", &[]);
-    let installed = install_from_source(&temp, &agent_dir, &source, &["--alias", "deleted-config"]);
+    let installed = install_from_source(
+        &temp,
+        &agent_dir,
+        &source,
+        &["--install-id", "deleted-config"],
+    );
     assert_success(&installed);
     let active = agent_dir.join("config.yml");
     assert!(
@@ -3808,7 +4143,8 @@ fn config_yaml_default_update_preserves_deleted_config_and_candidate_ownership()
         .join("agent/config.yml");
     fs::write(&source_config, "version: second\n").expect("failed to update topology config");
 
-    let first_update = run_cli_without_agent_dir(&temp, &["update", "--alias", "deleted-config"]);
+    let first_update =
+        run_cli_without_agent_dir(&temp, &["update", "--install-id", "deleted-config"]);
     assert_success(&first_update);
     assert!(
         !active.exists(),
@@ -3825,7 +4161,8 @@ fn config_yaml_default_update_preserves_deleted_config_and_candidate_ownership()
     );
 
     fs::write(&source_config, "version: third\n").expect("failed to update topology config");
-    let second_update = run_cli_without_agent_dir(&temp, &["update", "--alias", "deleted-config"]);
+    let second_update =
+        run_cli_without_agent_dir(&temp, &["update", "--install-id", "deleted-config"]);
     assert_success(&second_update);
     assert_eq!(
         fs::read(agent_dir.join("config.yml.new")).expect("candidate disappeared"),
@@ -3837,7 +4174,7 @@ fn config_yaml_default_update_preserves_deleted_config_and_candidate_ownership()
     fs::write(agent_dir.join("config.yml.new"), edited_candidate)
         .expect("failed to edit config candidate");
     fs::write(&source_config, "version: fourth\n").expect("failed to update topology config");
-    let collision = run_cli_without_agent_dir(&temp, &["update", "--alias", "deleted-config"]);
+    let collision = run_cli_without_agent_dir(&temp, &["update", "--install-id", "deleted-config"]);
     assert!(
         !collision.status.success(),
         "update overwrote a user-edited config candidate"
@@ -3848,7 +4185,7 @@ fn config_yaml_default_update_preserves_deleted_config_and_candidate_ownership()
         "update changed the user's candidate after reporting a collision"
     );
 
-    let removed = run_cli_without_agent_dir(&temp, &["remove", "--alias", "deleted-config"]);
+    let removed = run_cli_without_agent_dir(&temp, &["remove", "--install-id", "deleted-config"]);
     assert_success(&removed);
     assert_eq!(
         fs::read(agent_dir.join("config.yml.new")).expect("remove deleted an edited candidate"),
@@ -3878,7 +4215,7 @@ fn config_yaml_merge_reconciles_topology_changes_and_preserves_profile_edits() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "merge-lifecycle", "--config-merge"],
+        &["--install-id", "merge-lifecycle", "--config-merge"],
     );
     assert_success(&installed);
     let merged = fs::read_to_string(&config).expect("failed to read merged config");
@@ -3911,7 +4248,12 @@ fn config_yaml_merge_reconciles_topology_changes_and_preserves_profile_edits() {
 
     let updated = run_cli_without_agent_dir(
         &temp,
-        &["update", "--alias", "merge-lifecycle", "--config-merge"],
+        &[
+            "update",
+            "--install-id",
+            "merge-lifecycle",
+            "--config-merge",
+        ],
     );
     assert_success(&updated);
     let reconciled = fs::read_to_string(&config).expect("failed to read reconciled config");
@@ -3949,7 +4291,7 @@ fn config_yaml_merge_precedence_is_selected_for_that_command() {
         &agent_dir,
         &source,
         &[
-            "--alias",
+            "--install-id",
             "topology-precedence",
             "--config-merge",
             "--config-precedence",
@@ -3976,7 +4318,7 @@ fn config_yaml_merge_precedence_is_selected_for_that_command() {
     )
     .expect("failed to update topology config");
     let default_mode_update =
-        run_cli_without_agent_dir(&temp, &["update", "--alias", "topology-precedence"]);
+        run_cli_without_agent_dir(&temp, &["update", "--install-id", "topology-precedence"]);
     assert_success(&default_mode_update);
     assert_eq!(
         fs::read(&config).expect("active config disappeared"),
@@ -4004,7 +4346,7 @@ fn config_yaml_replace_restores_unchanged_replacement_and_preserves_later_edits(
         &agent_dir,
         &source,
         &[
-            "--alias",
+            "--install-id",
             "replace-lifecycle",
             "--config-replace",
             "--dry-run",
@@ -4026,7 +4368,7 @@ fn config_yaml_replace_restores_unchanged_replacement_and_preserves_later_edits(
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "replace-lifecycle", "--config-replace"],
+        &["--install-id", "replace-lifecycle", "--config-replace"],
     );
     assert_success(&replaced);
     let replacement = fs::read_to_string(&config).expect("replacement config disappeared");
@@ -4039,7 +4381,8 @@ fn config_yaml_replace_restores_unchanged_replacement_and_preserves_later_edits(
         "replace retained unrelated profile config:\n{replacement}"
     );
 
-    let removed = run_cli_without_agent_dir(&temp, &["remove", "--alias", "replace-lifecycle"]);
+    let removed =
+        run_cli_without_agent_dir(&temp, &["remove", "--install-id", "replace-lifecycle"]);
     assert_success(&removed);
     assert_eq!(
         fs::read(&config).expect("remove did not restore the prior config"),
@@ -4057,14 +4400,16 @@ fn config_yaml_replace_restores_unchanged_replacement_and_preserves_later_edits(
         &edited_temp,
         &edited_agent,
         &edited_source,
-        &["--alias", "edited-replacement", "--config-replace"],
+        &["--install-id", "edited-replacement", "--config-replace"],
     );
     assert_success(&edited_install);
 
     let local_config = b"topologyOnly: edited-after-install\n";
     fs::write(&edited_config, local_config).expect("failed to edit replacement");
-    let edited_remove =
-        run_cli_without_agent_dir(&edited_temp, &["remove", "--alias", "edited-replacement"]);
+    let edited_remove = run_cli_without_agent_dir(
+        &edited_temp,
+        &["remove", "--install-id", "edited-replacement"],
+    );
     assert_success(&edited_remove);
     assert_eq!(
         fs::read(&edited_config).expect("remove deleted a locally edited replacement"),
@@ -4105,7 +4450,7 @@ fn main_to_topology_directory_symlink_updates_only_declared_files_and_survives_r
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "main-topology-link"],
+        &["--install-id", "main-topology-link"],
     );
     assert_success(&installed);
     assert!(link.is_symlink(), "install replaced the main-profile link");
@@ -4127,7 +4472,8 @@ fn main_to_topology_directory_symlink_updates_only_declared_files_and_survives_r
     .expect("failed to update the topology file");
     fs::write(source_agent.join("sessions/added.md"), b"newly declared\n")
         .expect("failed to add a topology file");
-    let update = run_cli_without_agent_dir(&temp, &["update", "--alias", "main-topology-link"]);
+    let update =
+        run_cli_without_agent_dir(&temp, &["update", "--install-id", "main-topology-link"]);
     assert_success(&update);
     assert!(link.is_symlink(), "update replaced the main-profile link");
     assert_eq!(
@@ -4150,7 +4496,8 @@ fn main_to_topology_directory_symlink_updates_only_declared_files_and_survives_r
         .expect("failed to drop the managed source file");
     fs::remove_file(source_agent.join("sessions/added.md"))
         .expect("failed to drop the other managed source file");
-    let dropped = run_cli_without_agent_dir(&temp, &["update", "--alias", "main-topology-link"]);
+    let dropped =
+        run_cli_without_agent_dir(&temp, &["update", "--install-id", "main-topology-link"]);
     assert_success(&dropped);
     assert_eq!(
         fs::read(linked_target.join("managed.md")).expect("update deleted a user-edited file"),
@@ -4166,7 +4513,8 @@ fn main_to_topology_directory_symlink_updates_only_declared_files_and_survives_r
         b"leave this user data alone\n"
     );
 
-    let removed = run_cli_without_agent_dir(&temp, &["remove", "--alias", "main-topology-link"]);
+    let removed =
+        run_cli_without_agent_dir(&temp, &["remove", "--install-id", "main-topology-link"]);
     assert_success(&removed);
     assert!(link.is_symlink(), "remove deleted the main-profile symlink");
     assert!(
@@ -4205,7 +4553,7 @@ fn update_dry_run_reports_resolved_directory_symlink_target_for_dropped_file() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "dry-run-linked-update"],
+        &["--install-id", "dry-run-linked-update"],
     );
     assert_success(&installed);
 
@@ -4221,7 +4569,12 @@ fn update_dry_run_reports_resolved_directory_symlink_target_for_dropped_file() {
 
     let dry_run = run_cli_without_agent_dir(
         &temp,
-        &["update", "--alias", "dry-run-linked-update", "--dry-run"],
+        &[
+            "update",
+            "--install-id",
+            "dry-run-linked-update",
+            "--dry-run",
+        ],
     );
     assert_success(&dry_run);
     let report = output_text(&dry_run);
@@ -4274,7 +4627,7 @@ fn remove_dry_run_reports_resolved_directory_symlink_target() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "dry-run-linked-remove"],
+        &["--install-id", "dry-run-linked-remove"],
     );
     assert_success(&installed);
 
@@ -4287,7 +4640,12 @@ fn remove_dry_run_reports_resolved_directory_symlink_target() {
 
     let dry_run = run_cli_without_agent_dir(
         &temp,
-        &["remove", "--alias", "dry-run-linked-remove", "--dry-run"],
+        &[
+            "remove",
+            "--install-id",
+            "dry-run-linked-remove",
+            "--dry-run",
+        ],
     );
     assert_success(&dry_run);
     let report = output_text(&dry_run);
@@ -4352,7 +4710,7 @@ fn main_to_topology_file_symlink_updates_declared_target_and_preserves_sibling()
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "main-topology-file-link"],
+        &["--install-id", "main-topology-file-link"],
     );
     assert_success(&installed);
     assert!(
@@ -4375,8 +4733,10 @@ fn main_to_topology_file_symlink_updates_declared_target_and_preserves_sibling()
 
     let updated_contents = b"source version two\n";
     fs::write(&source_file, updated_contents).expect("failed to update the topology source");
-    let update =
-        run_cli_without_agent_dir(&temp, &["update", "--alias", "main-topology-file-link"]);
+    let update = run_cli_without_agent_dir(
+        &temp,
+        &["update", "--install-id", "main-topology-file-link"],
+    );
     assert_success(&update);
     assert!(
         link.is_symlink(),
@@ -4396,8 +4756,10 @@ fn main_to_topology_file_symlink_updates_declared_target_and_preserves_sibling()
         user_contents,
         "update changed an undeclared sibling file in the symlink target"
     );
-    let removed =
-        run_cli_without_agent_dir(&temp, &["remove", "--alias", "main-topology-file-link"]);
+    let removed = run_cli_without_agent_dir(
+        &temp,
+        &["remove", "--install-id", "main-topology-file-link"],
+    );
     assert_success(&removed);
     assert!(
         link.is_symlink(),
@@ -4448,7 +4810,7 @@ fn remove_rejects_retargeted_adopted_file_symlink_before_mutation() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "remove-retargeted-adopted-file-link"],
+        &["--install-id", "remove-retargeted-adopted-file-link"],
     );
     assert_success(&installed);
     assert!(
@@ -4480,7 +4842,11 @@ fn remove_rejects_retargeted_adopted_file_symlink_before_mutation() {
 
     let removed = run_cli_without_agent_dir(
         &temp,
-        &["remove", "--alias", "remove-retargeted-adopted-file-link"],
+        &[
+            "remove",
+            "--install-id",
+            "remove-retargeted-adopted-file-link",
+        ],
     );
     assert!(
         !removed.status.success(),
@@ -4537,7 +4903,7 @@ fn remove_rejects_malformed_preexisting_manifest_without_mutation() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "malformed-preexisting-file-link"],
+        &["--install-id", "malformed-preexisting-file-link"],
     );
     assert_success(&installed);
     assert!(
@@ -4573,7 +4939,7 @@ fn remove_rejects_malformed_preexisting_manifest_without_mutation() {
     let manifest_before = fs::read(&manifest).expect("malformed ownership manifest is missing");
     let removed = run_cli_without_agent_dir(
         &temp,
-        &["remove", "--alias", "malformed-preexisting-file-link"],
+        &["remove", "--install-id", "malformed-preexisting-file-link"],
     );
     assert!(
         !removed.status.success(),
@@ -4638,7 +5004,7 @@ fn main_to_different_profile_symlink_fails_before_config_or_target_mutation() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "wrong-profile-link"],
+        &["--install-id", "wrong-profile-link"],
     );
 
     assert!(
@@ -4783,8 +5149,12 @@ fn main_to_topology_symlink_retarget_fails_before_writing_new_destination() {
         "setting: value\n",
         &[("sessions/managed.md", b"source version one\n")],
     );
-    let installed =
-        install_from_source(&temp, &agent_dir, &source, &["--alias", "retargeted-link"]);
+    let installed = install_from_source(
+        &temp,
+        &agent_dir,
+        &source,
+        &["--install-id", "retargeted-link"],
+    );
     assert_success(&installed);
 
     fs::write(
@@ -4797,7 +5167,7 @@ fn main_to_topology_symlink_retarget_fails_before_writing_new_destination() {
     .expect("failed to change topology source");
     fs::remove_file(&link).expect("failed to remove original link");
     symlink(&new_target, &link).expect("failed to retarget main-profile link");
-    let update = run_cli_without_agent_dir(&temp, &["update", "--alias", "retargeted-link"]);
+    let update = run_cli_without_agent_dir(&temp, &["update", "--install-id", "retargeted-link"]);
     assert!(
         !update.status.success(),
         "update followed a link retargeted after installation"
@@ -4857,7 +5227,7 @@ fn remove_rejects_retargeted_main_to_selected_profile_symlink_before_mutation() 
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "remove-retargeted-link"],
+        &["--install-id", "remove-retargeted-link"],
     );
     assert_success(&installed);
     assert_eq!(
@@ -4876,7 +5246,7 @@ fn remove_rejects_retargeted_main_to_selected_profile_symlink_before_mutation() 
     symlink(&new_target, &link).expect("failed to retarget main-profile link");
 
     let removed =
-        run_cli_without_agent_dir(&temp, &["remove", "--alias", "remove-retargeted-link"]);
+        run_cli_without_agent_dir(&temp, &["remove", "--install-id", "remove-retargeted-link"]);
 
     assert!(
         !removed.status.success(),
@@ -5174,7 +5544,7 @@ fn install_and_update_merge_through_preexisting_selected_profile_config_link() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", alias, "--config-merge"],
+        &["--install-id", alias, "--config-merge"],
     );
     assert_success(&installed);
     assert!(
@@ -5226,7 +5596,8 @@ fn install_and_update_merge_through_preexisting_selected_profile_config_link() {
         "task:\n  eager: always\ninstallOnly: present\nupdateOnly: added\n",
     )
     .expect("failed to update topology config");
-    let updated = run_cli_without_agent_dir(&temp, &["update", "--alias", alias, "--config-merge"]);
+    let updated =
+        run_cli_without_agent_dir(&temp, &["update", "--install-id", alias, "--config-merge"]);
     assert_success(&updated);
     assert!(
         config.is_symlink(),
@@ -5295,7 +5666,7 @@ fn config_yaml_merge_update_after_default_update_preserves_profile_value_through
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "config-link-default-then-merge"],
+        &["--install-id", "config-link-default-then-merge"],
     );
     assert_success(&installed);
     let active_bytes = b"setting: initial\nprofileOnly: preserve\n";
@@ -5311,7 +5682,7 @@ fn config_yaml_merge_update_after_default_update_preserves_profile_value_through
         .expect("failed to change topology config for safe-default update");
     let default_update = run_cli_without_agent_dir(
         &temp,
-        &["update", "--alias", "config-link-default-then-merge"],
+        &["update", "--install-id", "config-link-default-then-merge"],
     );
     assert_success(&default_update);
     assert!(
@@ -5330,7 +5701,7 @@ fn config_yaml_merge_update_after_default_update_preserves_profile_value_through
         &temp,
         &[
             "update",
-            "--alias",
+            "--install-id",
             "config-link-default-then-merge",
             "--config-merge",
         ],
@@ -5368,7 +5739,7 @@ fn replace_config_backup_survives_non_replace_update_and_remove() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", alias, "--config-replace"],
+        &["--install-id", alias, "--config-replace"],
     );
     assert_success(&installed);
 
@@ -5381,10 +5752,10 @@ fn replace_config_backup_survives_non_replace_update_and_remove() {
         "topologyOnly: updated\nnewTopology: added\n",
     )
     .expect("failed to change topology config before update");
-    let update = run_cli_without_agent_dir(&temp, &["update", "--alias", alias]);
+    let update = run_cli_without_agent_dir(&temp, &["update", "--install-id", alias]);
     assert_success(&update);
 
-    let remove = run_cli_without_agent_dir(&temp, &["remove", "--alias", alias]);
+    let remove = run_cli_without_agent_dir(&temp, &["remove", "--install-id", alias]);
     assert_success(&remove);
     assert_eq!(
         fs::read(&config).expect("remove did not restore the pre-replacement config"),
@@ -5422,7 +5793,7 @@ fn config_yaml_default_update_preserves_main_to_profile_symlink_and_publishes_ca
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "config-link-default"],
+        &["--install-id", "config-link-default"],
     );
     assert_success(&installed);
 
@@ -5436,7 +5807,8 @@ fn config_yaml_default_update_preserves_main_to_profile_symlink_and_publishes_ca
         .join("agent/config.yml");
     fs::write(&source_config, topology_config).expect("failed to update topology config");
 
-    let update = run_cli_without_agent_dir(&temp, &["update", "--alias", "config-link-default"]);
+    let update =
+        run_cli_without_agent_dir(&temp, &["update", "--install-id", "config-link-default"]);
     assert_success(&update);
     assert!(
         config.is_symlink(),
@@ -5484,7 +5856,7 @@ fn config_yaml_merge_update_writes_through_main_to_profile_symlink() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "config-link-merge"],
+        &["--install-id", "config-link-merge"],
     );
     assert_success(&installed);
     let active_bytes = b"setting: initial\nprofileOnly: preserve\n";
@@ -5500,7 +5872,12 @@ fn config_yaml_merge_update_writes_through_main_to_profile_symlink() {
 
     let update = run_cli_without_agent_dir(
         &temp,
-        &["update", "--alias", "config-link-merge", "--config-merge"],
+        &[
+            "update",
+            "--install-id",
+            "config-link-merge",
+            "--config-merge",
+        ],
     );
     assert_success(&update);
     assert!(
@@ -5549,7 +5926,7 @@ fn config_yaml_replace_update_writes_through_main_to_profile_symlink() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "config-link-replace"],
+        &["--install-id", "config-link-replace"],
     );
     assert_success(&installed);
     let active_bytes = b"# profile config before replacement\nprofileOnly: keep\n";
@@ -5567,7 +5944,7 @@ fn config_yaml_replace_update_writes_through_main_to_profile_symlink() {
         &temp,
         &[
             "update",
-            "--alias",
+            "--install-id",
             "config-link-replace",
             "--config-replace",
         ],
@@ -5606,14 +5983,15 @@ fn replace_remove_retry_clears_restored_config_bookkeeping() {
         &temp,
         &agent_dir,
         &source,
-        &["--alias", "replace-retry", "--config-replace"],
+        &["--install-id", "replace-retry", "--config-replace"],
     );
     assert_success(&installed);
 
     let managed = agent_dir.join("managed.txt");
     let local_edit = b"user-edited managed file\n";
     fs::write(&managed, local_edit).expect("failed to edit managed file");
-    let first_remove = run_cli_without_agent_dir(&temp, &["remove", "--alias", "replace-retry"]);
+    let first_remove =
+        run_cli_without_agent_dir(&temp, &["remove", "--install-id", "replace-retry"]);
     assert_success(&first_remove);
     let first_report = output_text(&first_remove);
     assert!(
@@ -5641,7 +6019,7 @@ fn replace_remove_retry_clears_restored_config_bookkeeping() {
     );
 
     fs::write(&managed, managed_bytes).expect("failed to resolve managed-file conflict");
-    let retry = run_cli_without_agent_dir(&temp, &["remove", "--alias", "replace-retry"]);
+    let retry = run_cli_without_agent_dir(&temp, &["remove", "--install-id", "replace-retry"]);
     assert_success(&retry);
     assert!(
         !managed.exists(),
@@ -5655,5 +6033,417 @@ fn replace_remove_retry_clears_restored_config_bookkeeping() {
         fs::read(&config).expect("retry removed the restored config"),
         prior_config,
         "retry changed the already-restored prior config"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn install_alias_requires_profile_and_rejects_agent_dir_without_mutation() {
+    let temp = TestDir::new();
+    let bin_dir = temp.0.join("validation-bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create fake PATH");
+    let omp_marker = temp.0.join("omp-invoked");
+    let fake_omp = bin_dir.join("omp");
+    fs::write(&fake_omp, "#!/bin/sh\n: > \"$OMP_TEST_MARKER\"\nexit 0\n")
+        .expect("failed to write fake omp");
+    fs::set_permissions(&fake_omp, fs::Permissions::from_mode(0o755))
+        .expect("failed to make fake omp executable");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+    let source = source.to_str().expect("source path is not UTF-8");
+    let target = temp.0.join("target");
+    let target_text = target.to_str().expect("target path is not UTF-8");
+
+    for (label, extra_args) in [
+        (
+            "profile with agent-dir",
+            vec![
+                "--profile",
+                "demo",
+                "--alias",
+                "omp-demo",
+                "--agent-dir",
+                target_text,
+            ],
+        ),
+        (
+            "missing profile",
+            vec!["--alias", "omp-demo", "--agent-dir", target_text],
+        ),
+    ] {
+        let mut args = vec!["install", "-t", TOPOLOGY, "--source", source];
+        args.extend(extra_args);
+        let output = cli_command(&temp, Path::new(env!("CARGO_MANIFEST_DIR")))
+            .args(&args)
+            .env("PATH", &bin_dir)
+            .env("OMP_TEST_MARKER", &omp_marker)
+            .output()
+            .expect("failed to execute invalid install");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{label} unexpectedly proceeded: {output:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--profile"),
+            "{label} did not report its profile requirement/conflict:\n{stderr}"
+        );
+        if label == "profile with agent-dir" {
+            assert!(
+                stderr.contains("--agent-dir"),
+                "profile/agent-dir conflict was not identified:\n{stderr}"
+            );
+        }
+        assert!(!omp_marker.exists(), "{label} invoked OMP");
+        assert!(!target.exists(), "{label} created the target");
+        assert!(
+            !temp.state_home().exists(),
+            "{label} created installer state"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_install_id_may_match_path_executable_without_shell_alias() {
+    let temp = TestDir::new();
+    let path_dir = create_path_dir(&temp);
+    add_path_executable(&path_dir, "teddy");
+    let profile = "path-install-id";
+    let agent_dir = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile)
+        .join("agent");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+    let source = source.to_str().expect("source path is not UTF-8");
+    let omp_log = temp.0.join("omp-invocations.log");
+    let alias_marker = temp.0.join("omp-alias-created");
+    let fake_omp = path_dir.join("omp");
+    fs::write(
+        &fake_omp,
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$OMP_TEST_OMP_LOG\"\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"config\" ] && [ \"$4\" = \"path\" ]; then\n\
+         \tprintf '%s\\n' \"$OMP_TEST_PROFILE_AGENT_DIR\"\n\
+         \texit 0\n\
+         fi\n\
+         exit 64\n",
+    )
+    .expect("failed to write fake omp");
+    fs::set_permissions(&fake_omp, fs::Permissions::from_mode(0o755))
+        .expect("failed to make fake omp executable");
+    let output = cli_command(&temp, Path::new(env!("CARGO_MANIFEST_DIR")))
+        .args([
+            "install",
+            "-t",
+            TOPOLOGY,
+            "--source",
+            source,
+            "--profile",
+            profile,
+            "--install-id",
+            "teddy",
+        ])
+        .env("PATH", &path_dir)
+        .env("OMP_TEST_PROFILE", profile)
+        .env("OMP_TEST_PROFILE_AGENT_DIR", &agent_dir)
+        .env("OMP_TEST_OMP_LOG", &omp_log)
+        .env("OMP_TEST_ALIAS_MARKER", &alias_marker)
+        .output()
+        .expect("failed to execute install with PATH-matching install ID");
+    assert_success(&output);
+    assert_eq!(
+        fs::read(agent_dir.join("payload.txt")).expect("install omitted the payload"),
+        b"payload"
+    );
+    let registry: serde_json::Value = serde_json::from_slice(
+        &fs::read(temp.state_home().join("omp-topology/registry.json"))
+            .expect("install omitted registry"),
+    )
+    .expect("registry is not valid JSON");
+    assert!(
+        registry["aliases"]["teddy"].is_object(),
+        "install ID matching the PATH executable was not registered"
+    );
+    assert_eq!(
+        fs::read_to_string(&omp_log).expect("OMP config path resolution was not recorded"),
+        format!("--profile {profile} config path\n"),
+        "install ID incorrectly invoked OMP shell-alias creation"
+    );
+    assert!(
+        !alias_marker.exists(),
+        "install ID matching a PATH executable created a shell alias"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn lifecycle_commands_reject_old_alias_flag_without_state_mutation() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("agent");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+    let installed = install_from_source(
+        &temp,
+        &agent_dir,
+        &source,
+        &["--install-id", "legacy-flag-check"],
+    );
+    assert_success(&installed);
+    let registry_path = temp.state_home().join("omp-topology/registry.json");
+    let registry_before = fs::read(&registry_path).expect("registry is missing");
+    let state_before = file_snapshot(&temp.state_home());
+    let target_before = file_snapshot(&agent_dir);
+
+    for args in [
+        vec!["update", "--alias", "legacy-flag-check"],
+        vec!["remove", "--alias", "legacy-flag-check"],
+        vec!["status", "--alias", "legacy-flag-check"],
+    ] {
+        let output = run_cli_without_agent_dir(&temp, &args);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "legacy lifecycle option unexpectedly succeeded for {args:?}: {output:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("--alias"),
+            "clap error did not identify the removed lifecycle option for {args:?}:\n{stderr}"
+        );
+        assert_eq!(
+            fs::read(&registry_path).expect("registry disappeared"),
+            registry_before,
+            "{args:?} changed the registry"
+        );
+        assert_eq!(
+            file_snapshot(&temp.state_home()),
+            state_before,
+            "{args:?} changed installer state"
+        );
+        assert_eq!(
+            file_snapshot(&agent_dir),
+            target_before,
+            "{args:?} changed the install target"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_alias_dry_run_never_invokes_omp_alias_creation_or_mutates_state() {
+    let temp = TestDir::new();
+    let path_dir = create_path_dir(&temp);
+    let profile = "dry-run-alias";
+    let agent_dir = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile)
+        .join("agent");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+
+    let output = run_install_from_source_with_path(
+        &temp,
+        &agent_dir,
+        &source,
+        "omp-dry-run",
+        true,
+        &path_dir,
+    );
+    assert_success(&output);
+    assert!(
+        !temp.0.join("omp-alias-created").exists(),
+        "dry-run created the OMP shell alias"
+    );
+    let invocation_log = temp.0.join("omp-invocations.log");
+    assert!(
+        !invocation_log.exists()
+            || fs::read_to_string(&invocation_log)
+                .expect("failed to read OMP invocation log")
+                .lines()
+                .all(|line| line.ends_with("config path")),
+        "dry-run invoked OMP shell-alias creation"
+    );
+    assert!(!agent_dir.exists(), "dry-run created the profile target");
+    assert!(
+        !temp.state_home().exists(),
+        "dry-run created installer state"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_omp_alias_creation_reports_partial_install_without_corrupting_json() {
+    let temp = TestDir::new();
+    let profile = "partial-alias";
+    let shell_alias = "omp-recovery";
+    let install_id = "retained-install";
+    let agent_dir = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile)
+        .join("agent");
+    let source = local_named_topology_source(
+        &temp,
+        "source",
+        "alpha",
+        "fixture: true\n",
+        &[("payload.txt", b"committed payload")],
+    );
+    let source = source.to_str().expect("source path is not UTF-8");
+    let bin_dir = temp.0.join("failure-omp-bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create fake PATH");
+    let invocation_log = temp.0.join("omp-invocations.log");
+    let fake_omp = bin_dir.join("omp");
+    fs::write(
+        &fake_omp,
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> \"$OMP_TEST_OMP_LOG\"\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"config\" ] && [ \"$4\" = \"path\" ]; then\n\
+         \tprintf '%s\\n' \"$OMP_TEST_PROFILE_AGENT_DIR\"\n\
+         \texit 0\n\
+         fi\n\
+         if [ \"$#\" -eq 4 ] && [ \"$1\" = \"--profile\" ] && [ \"$2\" = \"$OMP_TEST_PROFILE\" ] && [ \"$3\" = \"--alias\" ] && [ \"$4\" = \"$OMP_TEST_ALIAS\" ]; then\n\
+         \tprintf 'FAKE_OMP_STDOUT_MUST_NOT_LEAK\\n'\n\
+         \tprintf 'FAKE_OMP_STDERR_MUST_NOT_LEAK\\n' >&2\n\
+         \texit 23\n\
+         fi\n\
+         exit 64\n",
+    )
+    .expect("failed to write fake omp");
+    fs::set_permissions(&fake_omp, fs::Permissions::from_mode(0o755))
+        .expect("failed to make fake omp executable");
+
+    let output = cli_command(&temp, Path::new(env!("CARGO_MANIFEST_DIR")))
+        .args([
+            "install",
+            "-t",
+            "alpha",
+            "--source",
+            source,
+            "--profile",
+            profile,
+            "--install-id",
+            install_id,
+            "--alias",
+            shell_alias,
+            "--json",
+        ])
+        .env("PATH", &bin_dir)
+        .env("OMP_TEST_PROFILE", profile)
+        .env("OMP_TEST_ALIAS", shell_alias)
+        .env("OMP_TEST_PROFILE_AGENT_DIR", &agent_dir)
+        .env("OMP_TEST_OMP_LOG", &invocation_log)
+        .output()
+        .expect("failed to execute installer with failing OMP alias");
+    assert!(
+        !output.status.success(),
+        "install reported success despite OMP alias failure: {output:?}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.is_empty(),
+        "failed JSON install wrote non-JSON or partial JSON to stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("FAKE_OMP_STDOUT_MUST_NOT_LEAK")
+            && !stderr.contains("FAKE_OMP_STDOUT_MUST_NOT_LEAK")
+            && !stderr.contains("FAKE_OMP_STDERR_MUST_NOT_LEAK"),
+        "captured OMP output escaped into installer output:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("topology install is complete")
+            && stderr.contains("shell alias could not be created"),
+        "failure omitted explicit partial-completion diagnostics:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "recover by running 'omp --profile {profile} --alias {shell_alias}' manually"
+        )),
+        "failure omitted the exact manual recovery command:\n{stderr}"
+    );
+    assert!(
+        fs::read(agent_dir.join("payload.txt"))
+            .is_ok_and(|payload| payload == b"committed payload"),
+        "failed shell-alias creation rolled back the committed topology payload"
+    );
+    let registry: serde_json::Value = serde_json::from_slice(
+        &fs::read(temp.state_home().join("omp-topology/registry.json"))
+            .expect("committed install registry is missing"),
+    )
+    .expect("committed registry is not valid JSON");
+    assert!(
+        registry["aliases"][install_id].is_object(),
+        "failed shell-alias creation removed the committed install registry entry"
+    );
+    assert_eq!(
+        fs::read_to_string(&invocation_log).expect("fake OMP invocation log is missing"),
+        format!("--profile {profile} config path\n--profile {profile} --alias {shell_alias}\n"),
+        "OMP alias creation did not follow profile resolution after install commit"
+    );
+}
+
+#[test]
+fn public_install_status_and_profiles_json_use_install_id_terminology() {
+    let temp = TestDir::new();
+    let agent_dir = temp.0.join("custom-agent");
+    let source = local_topology_source(&temp, "fixture: true\n", &[("payload.txt", b"payload")]);
+
+    let installed = install_from_source(
+        &temp,
+        &agent_dir,
+        &source,
+        &["--install-id", "json-install-id", "--json"],
+    );
+    assert_success(&installed);
+    let install_json: serde_json::Value =
+        serde_json::from_slice(&installed.stdout).expect("install JSON is invalid");
+    assert_eq!(install_json["command"], "install");
+    assert!(
+        install_json["lines"]
+            .as_array()
+            .is_some_and(|lines| lines.iter().any(|line| {
+                line.as_str()
+                    .is_some_and(|line| line.contains("install ID 'json-install-id'"))
+            })),
+        "install JSON did not report the public install ID: {install_json}"
+    );
+    assert!(
+        install_json.get("alias").is_none(),
+        "install JSON exposed the legacy registry alias property: {install_json}"
+    );
+
+    let status = run_cli_without_agent_dir(
+        &temp,
+        &["status", "--install-id", "json-install-id", "--json"],
+    );
+    assert_success(&status);
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("status JSON is invalid");
+    assert_eq!(status_json["install_id"], "json-install-id");
+    assert!(
+        status_json.get("alias").is_none(),
+        "status JSON exposed the legacy registry alias property: {status_json}"
+    );
+
+    let profiles = run_cli_without_agent_dir(&temp, &["profiles", "list", "--json"]);
+    assert_success(&profiles);
+    let profiles_json: serde_json::Value =
+        serde_json::from_slice(&profiles.stdout).expect("profiles JSON is invalid");
+    let managed = profiles_json["profiles"]
+        .as_array()
+        .expect("profiles JSON omitted its profiles array")
+        .iter()
+        .flat_map(|profile| profile["managed"].as_array().into_iter().flatten())
+        .collect::<Vec<_>>();
+    assert!(
+        managed
+            .iter()
+            .any(|install| install["install_id"] == "json-install-id"),
+        "profiles JSON omitted the install ID: {profiles_json}"
+    );
+    assert!(
+        managed.iter().all(|install| install.get("alias").is_none()),
+        "profiles JSON exposed the legacy registry alias property: {profiles_json}"
     );
 }

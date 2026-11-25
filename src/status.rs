@@ -1,7 +1,7 @@
-//! Read-only status of one registry alias.
+//! Read-only status of one registry install ID.
 //!
 //! Answers, without mutating anything: what the registry records for an
-//! alias (target agent directory, profile, topology, source, installed
+//! install ID (target agent directory, profile, topology, source, installed
 //! pin/digest, lifecycle state), whether the per-agent ownership manifest
 //! is present and agrees with the registry, and whether the installed
 //! content is current or an update is available.
@@ -62,11 +62,11 @@ pub enum Freshness {
     Unknown { reason: String },
 }
 
-/// Typed, read-only status of one registry alias.
+/// Typed, read-only status of one registry install ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AliasStatus {
-    /// The alias this status was requested for.
-    pub alias: String,
+    /// The install ID this status was requested for.
+    pub install_id: String,
     /// Installed/partial lifecycle state recorded in the registry.
     pub state: InstallState,
     /// Resolved absolute agent directory this install targets.
@@ -92,7 +92,7 @@ pub struct AliasStatus {
     pub freshness: Freshness,
 }
 
-/// Read-only status of one registry alias.
+/// Read-only status of one registry install ID.
 ///
 /// `state_anchor` locates the registry document and the per-agent
 /// ownership manifest; it is intentionally separate from any source
@@ -100,16 +100,17 @@ pub struct AliasStatus {
 /// GitHub freshness uses [`source::resolve_remote_commit`] (`git
 /// ls-remote` only), local freshness hashes the source overlay in place.
 ///
-/// Errors: unknown alias, an unreadable/unsupported-version registry or
-/// manifest. A present manifest whose topology disagrees, and an
+/// Errors: unknown install ID, an unreadable/unsupported-version registry
+/// or manifest. A present manifest whose topology disagrees, and an
 /// unresolvable source, are reported in the returned data instead.
-pub fn alias_status(alias: &str, state_anchor: &Path) -> Result<AliasStatus, CliError> {
+pub fn alias_status(install_id: &str, state_anchor: &Path) -> Result<AliasStatus, CliError> {
     let registry = load_registry(state_anchor)?;
-    let entry = registry
-        .aliases
-        .get(alias)
-        .ok_or_else(|| CliError::Usage(format!("no install registered under alias '{alias}'")))?;
-    status_for_entry(alias, entry, state_anchor)
+    let entry = registry.aliases.get(install_id).ok_or_else(|| {
+        CliError::Usage(format!(
+            "no install registered under install ID '{install_id}'"
+        ))
+    })?;
+    status_for_entry(install_id, entry, state_anchor)
 }
 
 /// Status for an already-loaded registry entry (shared with bulk callers).
@@ -117,14 +118,14 @@ pub fn alias_status(alias: &str, state_anchor: &Path) -> Result<AliasStatus, Cli
 /// Performs no registry load of its own; `state_anchor` is used only for
 /// the ownership manifest.
 pub fn status_for_entry(
-    alias: &str,
+    install_id: &str,
     entry: &RegistryEntry,
     state_anchor: &Path,
 ) -> Result<AliasStatus, CliError> {
-    let manifest = manifest_status(alias, entry, state_anchor)?;
+    let manifest = manifest_status(install_id, entry, state_anchor)?;
     let freshness = freshness(entry);
     Ok(AliasStatus {
-        alias: alias.to_string(),
+        install_id: install_id.to_string(),
         state: entry.state,
         agent_dir: entry.agent_dir.clone(),
         profile: entry.profile.clone(),
@@ -140,14 +141,19 @@ pub fn status_for_entry(
 }
 
 /// Manifest presence/health: present and its topology matches the entry.
-/// Reads the ownership manifest the alias owns (per-alias or legacy).
+/// Reads the ownership manifest this install ID owns (per-install or
+/// legacy).
 fn manifest_status(
-    alias: &str,
+    install_id: &str,
     entry: &RegistryEntry,
     state_anchor: &Path,
 ) -> Result<ManifestStatus, CliError> {
-    let manifest_path =
-        state::manifest_path_for_slot(&entry.agent_dir, state_anchor, alias, entry.manifest_slot)?;
+    let manifest_path = state::manifest_path_for_slot(
+        &entry.agent_dir,
+        state_anchor,
+        install_id,
+        entry.manifest_slot,
+    )?;
     let Some(manifest) = state::load_manifest_at(&manifest_path, state_anchor)? else {
         return Ok(ManifestStatus::Missing);
     };

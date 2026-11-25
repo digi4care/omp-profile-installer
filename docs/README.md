@@ -7,10 +7,13 @@ design records and dossiers do **not** live here — they belong under
 ## Contents
 
 - [`installer.md`](installer.md) — how the installer works: topologies,
-  registry aliases, profiles, and agent directories; the install/update/
-  status/list/remove lifecycle; dry runs; source, ref, and exact-version
-  selection; the alias name preflight; ownership collisions; and
-  troubleshooting.
+  registry install IDs, profiles, and agent directories; the install/update/
+  status/list/remove lifecycle; shell shortcuts via `--alias`; dry runs;
+  source, ref, and exact-version selection; the name preflights; ownership
+  collisions; and troubleshooting.
+- [`v0.3-migration.md`](v0.3-migration.md) — migrating to the v0.3.0 CLI
+  contract: registry `--alias` becomes `--install-id`, `--alias` becomes an
+  OMP shell shortcut, and JSON `alias` becomes `install_id`.
 - [`topology-readme-template.md`](topology-readme-template.md) — the required
   starting point for the README of every new topology. See the
   [Adding a topology](../CONTRIBUTING.md#adding-a-topology) section of

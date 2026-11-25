@@ -139,7 +139,7 @@ fn install_source(
     agent_dir: &Path,
     source_root: &Path,
     name: &str,
-    alias: Option<&str>,
+    install_id: Option<&str>,
     json: bool,
 ) -> Output {
     let source = source_root.to_string_lossy().into_owned();
@@ -150,8 +150,8 @@ fn install_source(
         "--source".to_string(),
         source,
     ];
-    if let Some(alias) = alias {
-        args.extend(["--alias".to_string(), alias.to_string()]);
+    if let Some(install_id) = install_id {
+        args.extend(["--install-id".to_string(), install_id.to_string()]);
     }
     if json {
         args.push("--json".to_string());
@@ -233,9 +233,22 @@ fn snapshot_transaction_dirs(state_root: &Path) -> BTreeSet<PathBuf> {
         .collect()
 }
 
-fn run_cycles(temp: &TestDir, source_root: &Path, agent_dir: &Path, alias: &str, cycles: usize) {
+fn run_cycles(
+    temp: &TestDir,
+    source_root: &Path,
+    agent_dir: &Path,
+    install_id: &str,
+    cycles: usize,
+) {
     for _ in 0..cycles {
-        let installed = install_source(temp, agent_dir, source_root, TOPOLOGY, Some(alias), false);
+        let installed = install_source(
+            temp,
+            agent_dir,
+            source_root,
+            TOPOLOGY,
+            Some(install_id),
+            false,
+        );
         assert_success(&installed);
         let removed = run_for_agent(temp, agent_dir, &["remove", "--topology", TOPOLOGY]);
         assert_success(&removed);
@@ -373,7 +386,7 @@ fn updates_and_reinstalls_preserve_user_edits_and_deletions() {
     fs::write(topology_dir.join("agent/agents/second.md"), second_v2)
         .expect("failed to update fixture second file");
 
-    let update = run(&temp, &["update", "--alias", "preserve", "--json"]);
+    let update = run(&temp, &["update", "--install-id", "preserve", "--json"]);
     assert_eq!(json_document(&update)["command"], "update");
     assert_eq!(fs::read(&guide).unwrap().as_slice(), user_guide);
     assert!(
@@ -527,7 +540,7 @@ fn local_config_only_drift_is_visible_and_updatable() {
         true,
     );
     assert_eq!(json_document(&installed)["command"], "install");
-    let before = json_document(&run(&temp, &["status", "--alias", "digest", "--json"]));
+    let before = json_document(&run(&temp, &["status", "--install-id", "digest", "--json"]));
     assert_eq!(before["freshness"]["status"], "up-to-date");
 
     fs::write(
@@ -535,15 +548,15 @@ fn local_config_only_drift_is_visible_and_updatable() {
         "task:\n  eager: true\n  maxConcurrency: 4\n",
     )
     .expect("failed to make config-only source change");
-    let after = json_document(&run(&temp, &["status", "--alias", "digest", "--json"]));
+    let after = json_document(&run(&temp, &["status", "--install-id", "digest", "--json"]));
     assert_eq!(
         after["freshness"]["status"], "update-available",
         "a source config-only change was not reported as drift: {after}"
     );
 
-    let updated = json_document(&run(&temp, &["update", "--alias", "digest", "--json"]));
+    let updated = json_document(&run(&temp, &["update", "--install-id", "digest", "--json"]));
     assert_eq!(updated["command"], "update");
-    let current = json_document(&run(&temp, &["status", "--alias", "digest", "--json"]));
+    let current = json_document(&run(&temp, &["status", "--install-id", "digest", "--json"]));
     assert_eq!(current["freshness"]["status"], "up-to-date");
     assert!(
         fs::read_to_string(agent_dir.join("config.yml"))
@@ -592,7 +605,7 @@ fn update_source_switches_local_source_and_failed_override_keeps_previous_source
         &temp,
         &[
             "update",
-            "--alias",
+            "--install-id",
             "source-switch",
             "--source",
             &source_b_arg,
@@ -632,7 +645,7 @@ fn update_source_switches_local_source_and_failed_override_keeps_previous_source
         &temp,
         &[
             "update",
-            "--alias",
+            "--install-id",
             "source-switch",
             "--source",
             &missing_topology_arg,
@@ -659,7 +672,10 @@ fn update_source_switches_local_source_and_failed_override_keeps_previous_source
         b"source B after failure\n",
     )
     .expect("failed to change the previously selected source");
-    let update_saved_source = run(&temp, &["update", "--alias", "source-switch", "--json"]);
+    let update_saved_source = run(
+        &temp,
+        &["update", "--install-id", "source-switch", "--json"],
+    );
     assert_success(&update_saved_source);
     assert_eq!(
         fs::read(agent_dir.join("RULES.md")).expect("saved-source update omitted managed file"),
@@ -749,7 +765,7 @@ fn update_clears_github_ref_when_switching_to_local_source() {
             "https://github.com/owner/repo",
             "--ref",
             "release-1",
-            "--alias",
+            "--install-id",
             "source-switch",
             "--agent-dir",
         ])
@@ -786,7 +802,7 @@ fn update_clears_github_ref_when_switching_to_local_source() {
     let switched = command(&temp)
         .env("PATH", &fake_path)
         .env("OMP_FAKE_GIT_TREE", &source_root)
-        .args(["update", "--alias", "source-switch", "--source"])
+        .args(["update", "--install-id", "source-switch", "--source"])
         .arg(&local_source)
         .arg("--json")
         .output()
@@ -819,7 +835,7 @@ fn update_clears_github_ref_when_switching_to_local_source() {
     let updated_local = command(&temp)
         .env("PATH", &fake_path)
         .env("OMP_FAKE_GIT_TREE", &source_root)
-        .args(["update", "--alias", "source-switch", "--json"])
+        .args(["update", "--install-id", "source-switch", "--json"])
         .output()
         .expect("failed to execute update from the recorded local source");
     assert_success(&updated_local);
@@ -864,7 +880,7 @@ fn install_accepts_full_https_github_source_offline_and_normalizes_identity() {
             TOPOLOGY,
             "--source",
             "https://github.com/OWNER/REPO",
-            "--alias",
+            "--install-id",
             "https",
             "--agent-dir",
         ])
@@ -901,7 +917,7 @@ fn install_accepts_full_https_github_source_offline_and_normalizes_identity() {
             TOPOLOGY,
             "--source",
             "github:OWNER/REPO",
-            "--alias",
+            "--install-id",
             "shorthand",
             "--agent-dir",
         ])
@@ -952,7 +968,7 @@ fn update_preserves_installed_at_for_unchanged_local_source() {
         false,
     ));
 
-    let before = json_document(&run(&temp, &["status", "--alias", "stable", "--json"]));
+    let before = json_document(&run(&temp, &["status", "--install-id", "stable", "--json"]));
     let installed_at = before["installed_at"]
         .as_str()
         .expect("status omitted installed_at")
@@ -987,22 +1003,22 @@ fn update_preserves_installed_at_for_unchanged_local_source() {
     )
     .expect("failed to stage stale digest");
 
-    let drifted = json_document(&run(&temp, &["status", "--alias", "stable", "--json"]));
+    let drifted = json_document(&run(&temp, &["status", "--install-id", "stable", "--json"]));
     assert_eq!(drifted["freshness"]["status"], "update-available");
 
-    let updated = json_document(&run(&temp, &["update", "--alias", "stable", "--json"]));
+    let updated = json_document(&run(&temp, &["update", "--install-id", "stable", "--json"]));
     assert_eq!(updated["command"], "update");
 
-    let after = json_document(&run(&temp, &["status", "--alias", "stable", "--json"]));
+    let after = json_document(&run(&temp, &["status", "--install-id", "stable", "--json"]));
     assert_eq!(
         after["installed_at"], installed_at,
-        "updating an existing alias reset its original installation time"
+        "updating an existing install ID reset its original installation time"
     );
     assert_eq!(after["freshness"]["status"], "up-to-date");
 }
 
 #[test]
-fn lifecycle_json_alias_and_profile_discovery_are_consumer_visible() {
+fn lifecycle_json_install_id_and_profile_discovery_are_consumer_visible() {
     let temp = TestDir::new();
     let source_root = temp.0.join("source");
     let agent_dir = temp.0.join("MyAgent");
@@ -1020,16 +1036,27 @@ fn lifecycle_json_alias_and_profile_discovery_are_consumer_visible() {
         install_doc["lines"].as_array().is_some_and(|lines| {
             lines.iter().any(|line| {
                 line.as_str()
-                    .is_some_and(|line| line.contains("recorded alias 'myagent'"))
+                    .is_some_and(|line| line.contains("recorded install ID 'myagent'"))
             })
         }),
-        "install did not expose its lowercased default alias: {install_doc}"
+        "install did not expose its lowercased default install ID: {install_doc}"
+    );
+    assert!(
+        install_doc.get("alias").is_none(),
+        "install JSON exposed a registry alias field: {install_doc}"
     );
 
-    let status = json_document(&run(&temp, &["status", "--alias", "myagent", "--json"]));
+    let status = json_document(&run(
+        &temp,
+        &["status", "--install-id", "myagent", "--json"],
+    ));
     assert_eq!(status["command"], "status");
     assert_eq!(status["managed"], true);
-    assert_eq!(status["alias"], "myagent");
+    assert_eq!(status["install_id"], "myagent");
+    assert!(
+        status.get("alias").is_none(),
+        "status JSON exposed a registry alias field: {status}"
+    );
 
     let profiles = json_document(&run(&temp, &["profiles", "list", "--json"]));
     assert_eq!(profiles["command"], "profiles list");
@@ -1042,29 +1069,34 @@ fn lifecycle_json_alias_and_profile_discovery_are_consumer_visible() {
             profiles.iter().any(|profile| {
                 profile["agent_dir"] == resolved_agent
                     && profile["managed"].as_array().is_some_and(|managed| {
-                        managed.iter().any(|item| item["alias"] == "myagent")
+                        managed.iter().any(|item| {
+                            item["install_id"] == "myagent" && item.get("alias").is_none()
+                        })
                     })
             })
         }),
         "profile discovery omitted the registry-managed custom target: {profiles}"
     );
 
-    let removed = json_document(&run(&temp, &["remove", "--alias", "myagent", "--json"]));
+    let removed = json_document(&run(
+        &temp,
+        &["remove", "--install-id", "myagent", "--json"],
+    ));
     assert_eq!(removed["command"], "remove");
     assert!(!agent_dir.join("RULES.md").exists());
-    let missing_alias = run(&temp, &["status", "--alias", "myagent", "--json"]);
+    let missing_install_id = run(&temp, &["status", "--install-id", "myagent", "--json"]);
     assert!(
-        !missing_alias.status.success(),
-        "status accepted an alias after its install was removed"
+        !missing_install_id.status.success(),
+        "status accepted an install ID after its install was removed"
     );
     assert!(
-        missing_alias.stdout.is_empty(),
+        missing_install_id.stdout.is_empty(),
         "failed JSON command wrote non-JSON stdout"
     );
 }
 
 #[test]
-fn second_alias_dry_run_and_lifecycle_are_isolated_from_legacy_alias() {
+fn second_install_id_dry_run_and_lifecycle_are_isolated_from_default_install() {
     let temp = TestDir::new();
     let source_root = temp.0.join("source");
     let agent_dir = temp.0.join("omp-dps");
@@ -1105,7 +1137,7 @@ fn second_alias_dry_run_and_lifecycle_are_isolated_from_legacy_alias() {
             "omp-dps-plus",
             "--source",
             &source_arg,
-            "--alias",
+            "--install-id",
             "omp-dps-plus",
             "--dry-run",
             "--agent-dir",
@@ -1163,18 +1195,24 @@ fn second_alias_dry_run_and_lifecycle_are_isolated_from_legacy_alias() {
             .expect("second alias manifest is not valid JSON");
     assert_eq!(second_manifest_doc["topology"], "omp-dps-plus");
 
-    let first_status = json_document(&run(&temp, &["status", "--alias", "omp-dps", "--json"]));
+    let first_status = json_document(&run(
+        &temp,
+        &["status", "--install-id", "omp-dps", "--json"],
+    ));
     assert_eq!(first_status["manifest"], "healthy");
     let second_status = json_document(&run(
         &temp,
-        &["status", "--alias", "omp-dps-plus", "--json"],
+        &["status", "--install-id", "omp-dps-plus", "--json"],
     ));
     assert_eq!(second_status["manifest"], "healthy");
     assert_eq!(second_status["topology"], "omp-dps-plus");
 
     let lifecycle_target_before_dry_run = file_snapshot(&agent_dir);
     let lifecycle_state_before_dry_run = file_snapshot(&state_root);
-    let update_dry_run = run(&temp, &["update", "--alias", "omp-dps-plus", "--dry-run"]);
+    let update_dry_run = run(
+        &temp,
+        &["update", "--install-id", "omp-dps-plus", "--dry-run"],
+    );
     assert_success(&update_dry_run);
     assert_eq!(
         file_snapshot(&agent_dir),
@@ -1186,7 +1224,10 @@ fn second_alias_dry_run_and_lifecycle_are_isolated_from_legacy_alias() {
         lifecycle_state_before_dry_run,
         "multi-alias update dry-run changed registry or ownership manifests"
     );
-    let remove_dry_run = run(&temp, &["remove", "--alias", "omp-dps-plus", "--dry-run"]);
+    let remove_dry_run = run(
+        &temp,
+        &["remove", "--install-id", "omp-dps-plus", "--dry-run"],
+    );
     assert_success(&remove_dry_run);
     assert_eq!(
         file_snapshot(&agent_dir),
@@ -1205,7 +1246,7 @@ fn second_alias_dry_run_and_lifecycle_are_isolated_from_legacy_alias() {
         b"dps-plus v2\n",
     )
     .expect("failed to update second topology fixture");
-    let update = run(&temp, &["update", "--alias", "omp-dps-plus", "--json"]);
+    let update = run(&temp, &["update", "--install-id", "omp-dps-plus", "--json"]);
     assert_eq!(json_document(&update)["command"], "update");
     assert_eq!(
         fs::read(&second_file).expect("second alias update removed its file"),
@@ -1223,13 +1264,13 @@ fn second_alias_dry_run_and_lifecycle_are_isolated_from_legacy_alias() {
     );
     let second_status = json_document(&run(
         &temp,
-        &["status", "--alias", "omp-dps-plus", "--json"],
+        &["status", "--install-id", "omp-dps-plus", "--json"],
     ));
     assert_eq!(second_status["freshness"]["status"], "up-to-date");
 
     let removed = json_document(&run(
         &temp,
-        &["remove", "--alias", "omp-dps-plus", "--json"],
+        &["remove", "--install-id", "omp-dps-plus", "--json"],
     ));
     assert_eq!(removed["command"], "remove");
     assert!(!second_file.exists(), "remove retained second alias file");
@@ -1247,10 +1288,13 @@ fn second_alias_dry_run_and_lifecycle_are_isolated_from_legacy_alias() {
         "removing second alias retained its ownership manifest"
     );
     assert_eq!(
-        json_document(&run(&temp, &["status", "--alias", "omp-dps", "--json"]))["manifest"],
+        json_document(&run(
+            &temp,
+            &["status", "--install-id", "omp-dps", "--json"]
+        ))["manifest"],
         "healthy"
     );
-    let removed_status = run(&temp, &["status", "--alias", "omp-dps-plus", "--json"]);
+    let removed_status = run(&temp, &["status", "--install-id", "omp-dps-plus", "--json"]);
     assert!(
         !removed_status.status.success(),
         "status still found the removed alias:\n{}",
@@ -1296,7 +1340,7 @@ fn second_alias_config_merge_cannot_rewrite_another_alias_owned_key() {
             "omp-dps-plus",
             "--source",
             &source_arg,
-            "--alias",
+            "--install-id",
             "omp-dps-plus",
             "--config-merge",
             "--config-precedence",
@@ -1329,10 +1373,13 @@ fn second_alias_config_merge_cannot_rewrite_another_alias_owned_key() {
         first_manifest_before
     );
     assert_eq!(
-        json_document(&run(&temp, &["status", "--alias", "omp-dps", "--json"]))["manifest"],
+        json_document(&run(
+            &temp,
+            &["status", "--install-id", "omp-dps", "--json"]
+        ))["manifest"],
         "healthy"
     );
-    let second_status = run(&temp, &["status", "--alias", "omp-dps-plus", "--json"]);
+    let second_status = run(&temp, &["status", "--install-id", "omp-dps-plus", "--json"]);
     assert!(
         !second_status.status.success(),
         "rejected config-key collision registered the second alias"
@@ -1395,10 +1442,13 @@ fn second_alias_rejects_shared_file_collision_without_mutation() {
         "failed second-alias install removed first alias manifest"
     );
     assert_eq!(
-        json_document(&run(&temp, &["status", "--alias", "omp-dps", "--json"]))["manifest"],
+        json_document(&run(
+            &temp,
+            &["status", "--install-id", "omp-dps", "--json"]
+        ))["manifest"],
         "healthy"
     );
-    let second_status = run(&temp, &["status", "--alias", "omp-dps-plus", "--json"]);
+    let second_status = run(&temp, &["status", "--install-id", "omp-dps-plus", "--json"]);
     assert!(
         !second_status.status.success(),
         "failed second-alias install registered a new alias:\n{}",
@@ -1475,10 +1525,13 @@ fn second_alias_rejects_byte_identical_shared_file_without_mutation() {
         first_manifest_before
     );
     assert_eq!(
-        json_document(&run(&temp, &["status", "--alias", "first-alias", "--json"]))["manifest"],
+        json_document(&run(
+            &temp,
+            &["status", "--install-id", "first-alias", "--json"]
+        ))["manifest"],
         "healthy"
     );
-    let second_status = run(&temp, &["status", "--alias", "second-alias", "--json"]);
+    let second_status = run(&temp, &["status", "--install-id", "second-alias", "--json"]);
     assert!(
         !second_status.status.success(),
         "rejected install registered the second alias:\n{}",
@@ -1532,7 +1585,7 @@ fn checked_in_digital_product_studio_alias_collisions_fail_closed_in_both_orders
                 second_topology,
                 "--source",
                 &source_arg,
-                "--alias",
+                "--install-id",
                 second_alias,
                 "--dry-run",
             ],
@@ -1591,11 +1644,14 @@ fn checked_in_digital_product_studio_alias_collisions_fail_closed_in_both_orders
             first_manifest_before
         );
         assert_eq!(
-            json_document(&run(&temp, &["status", "--alias", first_alias, "--json"]))["manifest"],
+            json_document(&run(
+                &temp,
+                &["status", "--install-id", first_alias, "--json"]
+            ))["manifest"],
             "healthy",
             "first alias became unhealthy after the rejected collision"
         );
-        let second_status = run(&temp, &["status", "--alias", second_alias, "--json"]);
+        let second_status = run(&temp, &["status", "--install-id", second_alias, "--json"]);
         assert!(
             !second_status.status.success(),
             "rejected collision registered the second alias:\n{}",
@@ -1638,7 +1694,7 @@ fn second_alias_cannot_claim_first_alias_config_candidate() {
             "candidate-first",
             "--source",
             &source_arg,
-            "--alias",
+            "--install-id",
             "candidate-owner",
         ],
     );
@@ -1663,7 +1719,7 @@ fn second_alias_cannot_claim_first_alias_config_candidate() {
             "candidate-second",
             "--source",
             &source_arg,
-            "--alias",
+            "--install-id",
             "candidate-contender",
         ],
     );
@@ -1701,7 +1757,7 @@ fn second_alias_cannot_claim_first_alias_config_candidate() {
     assert_eq!(
         json_document(&run(
             &temp,
-            &["status", "--alias", "candidate-owner", "--json"]
+            &["status", "--install-id", "candidate-owner", "--json"]
         ))["manifest"],
         "healthy"
     );
@@ -1747,7 +1803,7 @@ fn remove_scopes_same_relative_skills_to_each_recorded_root() {
             "skills-first",
             "--source",
             &source_arg,
-            "--alias",
+            "--install-id",
             "skills-first-owner",
             "--skills-dir",
             &first_skills_arg,
@@ -1766,7 +1822,7 @@ fn remove_scopes_same_relative_skills_to_each_recorded_root() {
             "skills-second",
             "--source",
             &source_arg,
-            "--alias",
+            "--install-id",
             "skills-second-owner",
             "--skills-dir",
             &second_skills_arg,
@@ -1785,7 +1841,7 @@ fn remove_scopes_same_relative_skills_to_each_recorded_root() {
         b"second root skill\n"
     );
 
-    let removed = run(&temp, &["remove", "--alias", "skills-first-owner"]);
+    let removed = run(&temp, &["remove", "--install-id", "skills-first-owner"]);
     assert_success(&removed);
     assert!(
         !first_skill.exists(),
@@ -1806,7 +1862,7 @@ fn remove_scopes_same_relative_skills_to_each_recorded_root() {
     assert_eq!(
         json_document(&run(
             &temp,
-            &["status", "--alias", "skills-second-owner", "--json"]
+            &["status", "--install-id", "skills-second-owner", "--json"]
         ))["manifest"],
         "healthy"
     );
@@ -1843,7 +1899,7 @@ fn replace_update_cannot_remove_another_alias_merge_owned_config_key() {
             "replace-first",
             "--source",
             &source_arg,
-            "--alias",
+            "--install-id",
             "replace-owner",
             "--config-replace",
         ],
@@ -1858,7 +1914,7 @@ fn replace_update_cannot_remove_another_alias_merge_owned_config_key() {
             "merge-second",
             "--source",
             &source_arg,
-            "--alias",
+            "--install-id",
             "merge-owner",
             "--config-merge",
             "--config-precedence",
@@ -1885,7 +1941,12 @@ fn replace_update_cannot_remove_another_alias_merge_owned_config_key() {
 
     let rejected = run(
         &temp,
-        &["update", "--alias", "replace-owner", "--config-replace"],
+        &[
+            "update",
+            "--install-id",
+            "replace-owner",
+            "--config-replace",
+        ],
     );
     assert!(
         !rejected.status.success(),
@@ -1915,7 +1976,7 @@ fn replace_update_cannot_remove_another_alias_merge_owned_config_key() {
         &temp,
         &[
             "update",
-            "--alias",
+            "--install-id",
             "replace-owner",
             "--config-replace",
             "--dry-run",
@@ -1934,7 +1995,10 @@ fn replace_update_cannot_remove_another_alias_merge_owned_config_key() {
         "dry-run replace refusal changed registry or ownership manifests"
     );
     assert_eq!(
-        json_document(&run(&temp, &["status", "--alias", "merge-owner", "--json"]))["manifest"],
+        json_document(&run(
+            &temp,
+            &["status", "--install-id", "merge-owner", "--json"]
+        ))["manifest"],
         "healthy"
     );
 }
@@ -2032,7 +2096,7 @@ fn second_alias_install_and_remove_preserve_first_alias_recovery_snapshot() {
     fs::write(&second_marker, second_marker_bytes)
         .expect("failed to seed second alias recovery marker");
 
-    let removed = run(&temp, &["remove", "--alias", "second-alias", "--json"]);
+    let removed = run(&temp, &["remove", "--install-id", "second-alias", "--json"]);
     assert_eq!(json_document(&removed)["command"], "remove");
     assert!(
         first_snapshot.is_dir(),
@@ -2052,7 +2116,10 @@ fn second_alias_install_and_remove_preserve_first_alias_recovery_snapshot() {
         "successful second alias remove retained its own recovery marker"
     );
     assert_eq!(
-        json_document(&run(&temp, &["status", "--alias", "first-alias", "--json"]))["manifest"],
+        json_document(&run(
+            &temp,
+            &["status", "--install-id", "first-alias", "--json"]
+        ))["manifest"],
         "healthy"
     );
 }
@@ -2117,7 +2184,7 @@ fn aliases_remain_per_alias_after_legacy_owner_is_removed() {
     let b_manifest_before = fs::read(&b_manifest).expect("second alias manifest is missing");
     let b_file = agent_dir.join("agents/dps-plus.md");
 
-    let removed_a = run(&temp, &["remove", "--alias", "omp-dps", "--json"]);
+    let removed_a = run(&temp, &["remove", "--install-id", "omp-dps", "--json"]);
     assert_eq!(json_document(&removed_a)["command"], "remove");
     assert!(
         !legacy_manifest.exists(),
@@ -2134,7 +2201,7 @@ fn aliases_remain_per_alias_after_legacy_owner_is_removed() {
     assert_eq!(
         json_document(&run(
             &temp,
-            &["status", "--alias", "omp-dps-plus", "--json"]
+            &["status", "--install-id", "omp-dps-plus", "--json"]
         ))["manifest"],
         "healthy"
     );
@@ -2185,11 +2252,11 @@ fn aliases_remain_per_alias_after_legacy_owner_is_removed() {
     let direct_status = run_for_agent(&temp, &agent_dir, &["status", "--json"]);
     assert!(
         !direct_status.status.success(),
-        "status accepted an ambiguous target without --alias"
+        "status accepted an ambiguous target without --install-id"
     );
     assert!(
-        output_text(&direct_status).contains("pass --alias NAME explicitly"),
-        "ambiguous status did not require an explicit alias:\n{}",
+        output_text(&direct_status).contains("pass --install-id NAME explicitly"),
+        "ambiguous status did not require an explicit install ID:\n{}",
         output_text(&direct_status)
     );
 
@@ -2198,7 +2265,7 @@ fn aliases_remain_per_alias_after_legacy_owner_is_removed() {
         b"dps-plus v2\n",
     )
     .expect("failed to update B's topology fixture");
-    let update_b = run(&temp, &["update", "--alias", "omp-dps-plus", "--json"]);
+    let update_b = run(&temp, &["update", "--install-id", "omp-dps-plus", "--json"]);
     assert_eq!(json_document(&update_b)["command"], "update");
     assert_eq!(fs::read(&b_file).unwrap(), b"dps-plus v2\n");
     assert_eq!(
@@ -2211,7 +2278,7 @@ fn aliases_remain_per_alias_after_legacy_owner_is_removed() {
         "updating B changed C's ownership"
     );
 
-    let removed_b = run(&temp, &["remove", "--alias", "omp-dps-plus", "--json"]);
+    let removed_b = run(&temp, &["remove", "--install-id", "omp-dps-plus", "--json"]);
     assert_eq!(json_document(&removed_b)["command"], "remove");
     assert!(!b_file.exists(), "removing B retained B's file");
     assert!(
@@ -2232,7 +2299,10 @@ fn aliases_remain_per_alias_after_legacy_owner_is_removed() {
         "removing B recreated the legacy manifest"
     );
     assert_eq!(
-        json_document(&run(&temp, &["status", "--alias", "omp-dps-ci", "--json"]))["manifest"],
+        json_document(&run(
+            &temp,
+            &["status", "--install-id", "omp-dps-ci", "--json"]
+        ))["manifest"],
         "healthy"
     );
 }
@@ -2280,6 +2350,69 @@ fn malformed_registry_fails_closed_before_install_mutates_target() {
     assert!(
         !agent_dir.join("RULES.md").exists(),
         "install copied owned files after registry validation failed"
+    );
+}
+
+#[test]
+fn invalid_registry_install_id_uses_public_terminology_and_fails_closed() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    write_topology(
+        &source_root,
+        TOPOLOGY,
+        "task:\n  eager: true\n",
+        &[("RULES.md", b"managed rules\n")],
+    );
+    let registry = temp.state_home().join("omp-topology/registry.json");
+    fs::create_dir_all(registry.parent().unwrap()).expect("failed to create registry directory");
+    fs::write(
+        &registry,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "aliases": {
+                "Invalid ID": {}
+            }
+        }))
+        .expect("failed to encode invalid install ID registry"),
+    )
+    .expect("failed to seed invalid install ID registry");
+    let agent_dir = temp.0.join("agent");
+    fs::create_dir_all(&agent_dir).expect("failed to create target agent directory");
+    let user_file = agent_dir.join("user-owned.md");
+    fs::write(&user_file, b"must remain untouched\n").expect("failed to seed user file");
+
+    let output = install_source(
+        &temp,
+        &agent_dir,
+        &source_root,
+        TOPOLOGY,
+        Some("valid-install-id"),
+        false,
+    );
+    assert!(
+        !output.status.success(),
+        "install accepted an invalid registry install ID"
+    );
+    let diagnostic = output_text(&output);
+    assert_eq!(
+        fs::read(&user_file).expect("invalid registry validation changed user data"),
+        b"must remain untouched\n"
+    );
+    assert!(
+        !agent_dir.join("config.yml").exists(),
+        "install mutated config after registry validation failed"
+    );
+    assert!(
+        !agent_dir.join("RULES.md").exists(),
+        "install copied owned files after registry validation failed"
+    );
+    assert!(
+        diagnostic.contains("invalid install ID"),
+        "registry validation did not use public install ID terminology:\n{diagnostic}"
+    );
+    assert!(
+        !diagnostic.contains("invalid alias"),
+        "registry validation leaked internal alias terminology:\n{diagnostic}"
     );
 }
 
@@ -2413,7 +2546,7 @@ fn update_reinstalls_when_registry_alias_has_no_ownership_manifest() {
     fs::remove_file(agent_dir.join("RULES.md")).expect("failed to remove installed rules");
     fs::remove_file(agent_dir.join("config.yml")).expect("failed to remove installed config");
 
-    let updated = run(&temp, &["update", "--alias", "repair"]);
+    let updated = run(&temp, &["update", "--install-id", "repair"]);
     assert_success(&updated);
     assert!(
         manifest_exists(&temp),
@@ -2473,7 +2606,7 @@ fn default_git_branch_uses_commit_from_normal_ls_remote_symref_output() {
     registry["aliases"]["remote"]["resolved_commit"] = serde_json::json!(old_commit);
     registry["aliases"]["remote"]
         .as_object_mut()
-        .expect("registry alias was not an object")
+        .expect("registry entry was not an object")
         .remove("overlay_digest");
     fs::write(
         &registry_path,
@@ -2506,7 +2639,7 @@ fn default_git_branch_uses_commit_from_normal_ls_remote_symref_output() {
 
     let output = command(&temp)
         .env("PATH", &fake_bin)
-        .args(["status", "--alias", "remote", "--json"])
+        .args(["status", "--install-id", "remote", "--json"])
         .output()
         .expect("failed to execute status with fake git");
     let report = json_document(&output);
@@ -3014,9 +3147,9 @@ fn large_profile_and_registry_discovery_is_complete_and_stable() {
         observed.insert((
             name,
             agent_dir,
-            managed[0]["alias"]
+            managed[0]["install_id"]
                 .as_str()
-                .expect("managed install omitted its alias")
+                .expect("managed install omitted its install ID")
                 .to_string(),
         ));
     }
@@ -3108,7 +3241,10 @@ fn registry_removal_keeps_referenced_and_deterministic_bounded_source_caches() {
     )
     .expect("failed to seed cache registry");
 
-    let removed = json_document(&run(&temp, &["remove", "--alias", "stale-cache", "--json"]));
+    let removed = json_document(&run(
+        &temp,
+        &["remove", "--install-id", "stale-cache", "--json"],
+    ));
     assert_eq!(removed["command"], "remove");
 
     let expected_unreferenced: BTreeSet<String> = unreferenced

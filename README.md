@@ -6,8 +6,8 @@
 **Versioned, self-contained topology overlays for [OMP](https://github.com/can1357/oh-my-pi) agent profiles**<br>
 The `omp-topology` CLI discovers topologies in a source tree and installs them into
 named OMP profiles: a signed-release bootstrap for the CLI itself, dry-runnable
-and reversible installs, an alias registry, and signature-verified self-update —
-with no server to run and no sudo required.
+and reversible installs, an install registry with OMP shell-shortcut support,
+and signature-verified self-update — with no server to run and no sudo required.
 
 <br>
 
@@ -115,10 +115,10 @@ them, so a retry can finish the job.
 </td>
 <td width="33%" valign="top">
 
-### 🏷️ Alias registry
-Each install is registered under a stable alias (default: the
+### 🏷️ Install registry
+Each install is registered under a stable install ID (default: the
 profile name) in a versioned JSON registry under the XDG state
-root. Several aliases may target the same agent directory, each
+root. Several install IDs may target the same agent directory, each
 with independent ownership. Writes are locked; interrupted runs
 stay honestly `Partial`.
 
@@ -137,7 +137,7 @@ main→profile symlinks are followed with identity checks.
 <td width="33%" valign="top">
 
 ### 🔄 In-place updates
-`update --alias <name>` re-applies the recorded install against
+`update --install-id <name>` re-applies the recorded install against
 the current source pin — a no-op when current, refusing
 downgrades, with `--ref`, `--version`, and `--source` overrides
 for deliberate retargeting.
@@ -178,6 +178,20 @@ of being followed. It is the crate's only `unsafe` boundary.
 
 </td>
 </tr>
+<tr>
+<td colspan="3" valign="top">
+
+### 🔗 Shell shortcut installs
+`install --profile P --alias C` additionally asks OMP to create a shell
+command `C` that starts OMP with profile `P`: after the topology install
+commits, the installer delegates to `omp --profile P --alias C` and
+captures OMP's output. A failed shortcut is an explicit partial-completion
+error naming the manual `omp --profile P --alias C` recovery command —
+the committed install stays registered. Dry runs report the delegation but
+never invoke it; `update` and `remove` never create or delete shortcuts.
+
+</td>
+</tr>
 </table>
 
 ---
@@ -185,8 +199,8 @@ of being followed. It is the crate's only `unsafe` boundary.
 ## 🧠 Architecture
 
 The CLI is a single Rust crate. `src/main.rs` parses subcommands with clap and
-orchestrates; each alias has an ownership manifest recording SHA-256 hashes of
-installed files and prior config values. A cross-agent alias registry lives
+orchestrates; each install has an ownership manifest recording SHA-256 hashes of
+installed files and prior config values. A cross-agent install registry lives
 under the XDG state root. One install request flows like this:
 
 ```
@@ -214,8 +228,13 @@ src/state.rs      write the ownership manifest (files → SHA-256,
                   config prior/installed leaf values)
         │
         ▼
-src/registry.rs   stage the alias entry as Partial, run the install under
+src/registry.rs   stage the install entry as Partial, run the install under
                   the registry lock, flip it to Installed
+        │
+        ▼
+(optional)        with --profile P --alias C, delegate shell-shortcut
+                  creation to `omp --profile P --alias C` after the
+                  install lands
 ```
 
 ---
@@ -247,10 +266,12 @@ omp-topology install -t digital-product-studio \
   --source github:digi4care/omp-topologies \
   --profile digital-product-studio --dry-run
 
-# Apply it, then start OMP with that profile
+# Apply it, optionally also creating a `studio` shell command that runs
+# OMP with this profile (via `omp --profile digital-product-studio
+# --alias studio`), then start OMP with that profile
 omp-topology install -t digital-product-studio \
   --source github:digi4care/omp-topologies \
-  --profile digital-product-studio
+  --profile digital-product-studio --alias studio
 omp --profile digital-product-studio
 ```
 
@@ -265,7 +286,10 @@ cargo run -- install -t digital-product-studio --profile digital-product-studio 
 ```
 
 More guidance: [docs/installer.md](docs/installer.md) (how the installer
-works: aliases, profiles, preflight checks, and troubleshooting),
+works: install IDs, profiles, shell aliases, preflight checks, and
+troubleshooting),
+[docs/v0.3-migration.md](docs/v0.3-migration.md) (the v0.3.0 `--alias` →
+`--install-id` contract for users coming from v0.2),
 [topologies/README.md](topologies/README.md) (payload layout and
 discovery), [CONTRIBUTING.md](CONTRIBUTING.md) (adding a topology, verification).
 
@@ -285,27 +309,31 @@ The day-to-day lifecycle is `list → install → status → update → remove`:
    through `omp --profile NAME config path` can create a missing profile as an
    OMP side effect; explicit `--agent-dir` and ambient `omp config path`
    resolution do not create a target directory.
-3. **Install.** Creating a new alias first passes the alias name preflight:
-   the alias must not already be registered for another target, and no
-   executable file with the alias's name may exist on `PATH` (shell aliases
-   and functions are not detectable). The real run then applies the overlay
-   in one transaction and registers the alias. Re-installing under the same
-   alias and target is an intentional upsert; an alias pointing elsewhere is
-   refused with an actionable error. See
+3. **Install.** Creating a new install ID first passes the registry
+   preflight: the ID must not already be registered for another target.
+   Requesting a shell shortcut with `--profile P --alias C` additionally
+   passes the alias name preflight before any target or profile mutation:
+   no executable file named `C` may exist on `PATH` (shell aliases and
+   functions are not detectable). The real run then applies the overlay in
+   one transaction, registers the install, and — with `--alias` — delegates
+   shortcut creation to `omp --profile P --alias C`.
+   Re-installing under the same install ID and target is an intentional
+   upsert; an install ID pointing elsewhere is refused with an actionable
+   error. See
    [docs/installer.md](docs/installer.md#alias-name-preflight).
-   A second alias may target the same agent directory: each alias owns only
-   what it installed, and any overlap with another alias's files or config
-   keys is refused before anything is mutated.
-4. **Inspect.** `status --alias <name>` reports what the registry records,
+   A second install ID may target the same agent directory: each install
+   owns only what it installed, and any overlap with another install's
+   files or config keys is refused before anything is mutated.
+4. **Inspect.** `status --install-id <name>` reports what the registry records,
    whether the ownership manifest is healthy, and whether the source has moved
    on (`up to date` / `update available` / `unknown`).
-5. **Update.** `update --alias <name>` re-applies the recorded install against
+5. **Update.** `update --install-id <name>` re-applies the recorded install against
    the current pin; it is a no-op (no clone) when already current and refuses
    to move the install to an older topology version.
-6. **Remove.** `remove --alias <name>` restores prior config values and deletes
-   what the topology added under that alias. Files you edited after install are
+6. **Remove.** `remove --install-id <name>` restores prior config values and deletes
+   what the topology added under that install. Files you edited after install are
    preserved and listed, and the removal stays retryable until everything is
-   resolved.
+   resolved. Neither `update` nor `remove` creates or deletes shell shortcuts.
 
 Every command accepts `--json`, which emits exactly one JSON document on stdout;
 in human mode the captured command lines are printed unchanged. Failures print
@@ -348,32 +376,33 @@ other and of the CLI's own release version.
   `topology.yml` declares exactly that version, and fails otherwise. Combine
   it with `--ref` when you need both a specific ref and a specific declared
   version.
-- `update --alias <name>` always targets the install recorded under that
-  *existing* alias and re-applies it against the selected source. It refuses
-  to move an install to an older topology version — downgrades are rejected,
-  so a stale `--ref` or an older source cannot silently roll you back.
+- `update --install-id <name>` always targets the install recorded under
+  that *existing* install ID and re-applies it against the selected source.
+  It refuses to move an install to an older topology version — downgrades
+  are rejected, so a stale `--ref` or an older source cannot silently roll
+  you back.
 
-**Verifying an update from version X to Y** (use an alias that already
+**Verifying an update from version X to Y** (use an install ID that already
 exists — `update` does not create installs):
 
 ```sh
-# 1. Dry-run against the existing alias; change nothing. The plan lists the
+# 1. Dry-run against the existing install ID; change nothing. The plan lists the
 #    planned file and config changes but prints no version numbers. The
 #    --version 2.0.1 assertion is itself the version proof: the command
 #    fails here unless the selected source's topology.yml declares exactly
 #    2.0.1.
-omp-topology update --alias digital-product-studio \
+omp-topology update --install-id digital-product-studio \
   --ref main --version 2.0.1 --dry-run
 
 # 2. Apply for real once the plan looks right. The same --version assertion
 #    is re-checked before anything is mutated.
-omp-topology update --alias digital-product-studio \
+omp-topology update --install-id digital-product-studio \
   --ref main --version 2.0.1
 
 # 3. Confirm what the registry records: source, commit/digest, and
 #    freshness. status compares commit/digest freshness only and does not
 #    print a topology version.
-omp-topology status --alias digital-product-studio
+omp-topology status --install-id digital-product-studio
 ```
 
 Omit `--ref` to update against the source recorded at install time; omit
@@ -461,10 +490,10 @@ local Docker runs only; GitHub-hosted CI caches separately and is unchanged.
 │   ├── main.rs              # CLI entry point: subcommands, output, exit codes
 │   ├── install.rs           # install transaction: plan, apply, backups, rollback
 │   ├── remove.rs            # edit-aware, retryable uninstallation
-│   ├── update.rs            # per-alias refresh against the current source pin
-│   ├── status.rs            # read-only alias status and freshness
+│   ├── update.rs            # per-install refresh against the current source pin
+│   ├── status.rs            # read-only install status and freshness
 │   ├── profiles.rs          # OMP profile discovery and CLI target resolution
-│   ├── registry.rs          # alias → install metadata registry (locked, versioned)
+│   ├── registry.rs          # install ID → install metadata registry (locked, versioned)
 │   ├── state.rs             # XDG state root, ownership manifest, snapshots
 │   ├── source.rs            # github:/local source resolution + bounded cache
 │   ├── topology.rs          # topology.yml parsing and overlay discovery
@@ -511,7 +540,8 @@ Defaults below are what the code actually applies when the option is absent.
 | `--ref` | `list`, `install`, `update` | Selects which Git ref of the source is read — a branch, tag, or full 40-hex SHA; it picks the checkout only and never resolves a topology version. For list/install it requires a GitHub `--source`. For update, optionally overrides the recorded GitHub source's ref without a new `--source`; invalid with a local source. | the remote's default `HEAD` |
 | `--profile` | `install`, `remove`, `status` | Target profile, resolved via `omp --profile NAME config path` (mutually exclusive with `--agent-dir`) | ambient profile from `omp config path` |
 | `--agent-dir` | `install`, `remove`, `status` | Explicit target agent directory | — |
-| `--alias` | `install`, `remove`, `status`, `update` | Stable registry alias selecting the install | profile name, else lowercased agent-dir basename; `update` requires it |
+| `--install-id` | `install`, `remove`, `status`, `update` | Stable registry ID selecting the install | profile name, else lowercased agent-dir basename; `update` requires it |
+| `--alias` | `install` | OMP shell shortcut created after a successful install by delegating to `omp --profile <profile> --alias <alias>`; requires `--profile`, incompatible with `--agent-dir`, preflight-checked against `PATH` executables | no shell shortcut |
 | `--skills-dir` | `install`, `remove` | Explicit root that receives the overlay's `skills/*` | skills install under the agent directory |
 | `--config-merge` + `--config-precedence` | `install`, `update` | Structural merge into the active `config.yml`; `profile` (default) or `topology` wins | candidate mode: create an absent active config; otherwise preserve a pre-existing/user-edited active config and publish `config.yml.new` |
 | `--config-replace` | `install`, `update` | Replace the active config; the pre-replacement config is restored on `remove` | candidate mode |
@@ -541,14 +571,23 @@ Defaults below are what the code actually applies when the option is absent.
 - **Edit-aware removal** — files edited after install and config keys changed
   by the user are preserved and reported, not clobbered; the ownership manifest
   keeps the unresolved state so a later retry finishes the job.
-- **One topology per alias, independent ownership** — multiple aliases may
-  target the same agent directory; each alias owns only the files and config
-  keys it installed, tracked per alias in the ownership manifest. Any file or
-  config key already owned by another alias is refused before mutation; no
-  alias overwrites, deletes, or depends on another alias's files or config.
-  Reinstalling under the same alias and target is an
-  upsert; reusing the alias for another target is refused. Ownership manifests
-  written before per-alias ownership (single-alias) remain supported.
+- **One topology per install ID, independent ownership** — multiple
+  install IDs may target the same agent directory; each install owns only
+  the files and config keys it installed, tracked per install in the
+  ownership manifest. Any file or config key already owned by another
+  install is refused before mutation; no install overwrites, deletes, or
+  depends on another install's files. Ownership manifests written before
+  per-install ownership (single-install) remain supported.
+  Reinstalling under the same install ID and target is an
+  upsert; reusing the ID for another target is refused.
+- **Shell shortcuts belong to OMP** — `--alias` never reimplements
+  shell-rc editing: the installer delegates to
+  `omp --profile <profile> --alias <alias>` after the install commits and
+  captures OMP's output. A failed shortcut is an explicit partial-completion
+  error naming the manual recovery command, and the committed install stays
+  registered rather than being rolled back unsafely. `update` and `remove`
+  never create or delete shortcuts, and `--dry-run` never invokes the
+  delegation.
 - **Config modes are never remembered** — `update` and `remove` derive their
   behavior from what the ownership manifest recorded, not from flags a previous
   command happened to pass.
@@ -573,13 +612,15 @@ Defaults below are what the code actually applies when the option is absent.
 - **Platform coverage** — Linux x86_64 only, as a static musl build (no Linux
   aarch64/armv7/glibc-specific builds); macOS Intel and Apple Silicon. No
   Windows builds.
-- **External tools** — profile targeting invokes `omp` (`config path`); GitHub
-  sources invoke `git`; release installs and self-update need `curl`, `openssl`,
-  and `tar`; the bootstrap needs `sha256sum` (Linux) or `shasum` (macOS).
-- **Cross-alias ownership collisions are refused** — a second alias may
-  install into the same agent directory, but differing file bytes or config
-  values already owned by another alias are a fail-closed collision; remove
-  the owning alias's install first if the overlap must go away.
+- **External tools** — profile targeting invokes `omp` (`config path`), and
+  shell-shortcut installs invoke `omp --profile <name> --alias <alias>`;
+  GitHub sources invoke `git`; release installs and self-update need `curl`,
+  `openssl`, and `tar`; the bootstrap needs `sha256sum` (Linux) or `shasum`
+  (macOS).
+- **Cross-install ownership collisions are refused** — a second install ID
+  may install into the same agent directory, but differing file bytes or
+  config values already owned by another install are a fail-closed
+  collision; remove the owning install first if the overlap must go away.
 - **Freshness can be `unknown`** — when a source cannot be resolved (network
   failure, moved or deleted local checkout, removed topology), `status` says so
   instead of guessing.

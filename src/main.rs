@@ -4,13 +4,13 @@
 //!
 //! * `list` — list installable topologies (checkout root or `--source`).
 //! * `install` — merge a topology into an OMP agent directory and register
-//!   the install under a stable alias.
+//!   the install under a stable install ID.
 //! * `remove` — remove a topology, restoring prior config values, and
 //!   reconcile the install registry.
 //! * `profiles list` — filesystem discovery of OMP profiles and
 //!   registry-managed installs (never creates profiles).
-//! * `status` — read-only status of a managed alias or explicit target.
-//! * `update` — refresh one registry alias to the current source pin.
+//! * `status` — read-only status of a managed install ID or explicit target.
+//! * `update` — refresh one registry install ID to the current source pin.
 //! * `self-update` — install a signed GitHub Release of this CLI.
 //!
 //! JSON mode (`--json`) emits exactly one JSON document on stdout;
@@ -73,15 +73,15 @@ struct Cli {
 enum Command {
     /// List installable topologies
     List(ListArgs),
-    /// Install a topology into an OMP agent dir and register the alias
+    /// Install a topology into an OMP agent dir and register the install
     Install(InstallArgs),
     /// Remove a topology, restoring prior config values
     Remove(RemoveArgs),
     /// List OMP profiles and registry-managed installs
     Profiles(ProfilesArgs),
-    /// Show status of a managed alias or explicit target
+    /// Show status of a managed install ID or explicit target
     Status(StatusArgs),
-    /// Update one registry alias to the current source pin
+    /// Update one registry install ID to the current source pin
     Update(UpdateArgs),
     /// Update this CLI from a signed GitHub Release
     SelfUpdate(SelfUpdateArgs),
@@ -114,17 +114,21 @@ struct InstallArgs {
     #[arg(long = "ref")]
     reference: Option<String>,
     /// OMP profile to install into (mutually exclusive with --agent-dir)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "agent_dir")]
     profile: Option<String>,
     /// Target agent directory (default: 'omp config path' for the profile)
     #[arg(long)]
     agent_dir: Option<String>,
-    /// Stable registry alias for this install (default: the profile
-    /// name, or the lowercased basename of the agent directory). An
-    /// alias does not select a profile: an alias-only install targets
-    /// the ambient/default profile's agent directory; pass --profile
-    /// NAME or --agent-dir PATH to select another target.
-    #[arg(long)]
+    /// Stable install ID for this install (default: the profile name, or
+    /// the lowercased basename of the agent directory). The install ID is
+    /// the registry key only: it never selects a profile, agent
+    /// directory, or PATH executable.
+    #[arg(long = "install-id")]
+    install_id: Option<String>,
+    /// OMP shell shortcut to create in the shell configuration
+    /// (requires --profile). The shell alias is independent of the
+    /// registry install ID and never influences install selection.
+    #[arg(long, requires = "profile", conflicts_with = "agent_dir")]
     alias: Option<String>,
     /// Explicit skills root: only skills/* install there
     #[arg(long)]
@@ -157,13 +161,14 @@ struct InstallArgs {
 
 #[derive(Args)]
 struct RemoveArgs {
-    /// Topology name; required without --alias and must match the alias
+    /// Topology name; required without --install-id and must match the
+    /// install ID's recorded topology
     #[arg(short, long)]
     topology: Option<String>,
-    /// Registry alias selecting the target and topology; mutually
-    /// exclusive with --profile and --agent-dir
-    #[arg(long)]
-    alias: Option<String>,
+    /// Install ID selecting the target and topology; mutually exclusive
+    /// with --profile and --agent-dir
+    #[arg(long = "install-id")]
+    install_id: Option<String>,
     /// Target profile (default: the ambient profile)
     #[arg(long)]
     profile: Option<String>,
@@ -202,10 +207,10 @@ struct ProfilesListArgs {
 
 #[derive(Args)]
 struct StatusArgs {
-    /// Registry alias to report on; mutually exclusive with --profile
-    /// and --agent-dir
-    #[arg(long)]
-    alias: Option<String>,
+    /// Install ID to report on; mutually exclusive with --profile and
+    /// --agent-dir
+    #[arg(long = "install-id")]
+    install_id: Option<String>,
     /// Report on this profile's agent directory
     #[arg(long)]
     profile: Option<String>,
@@ -219,9 +224,9 @@ struct StatusArgs {
 
 #[derive(Args)]
 struct UpdateArgs {
-    /// Stable registry alias to update
-    #[arg(long)]
-    alias: String,
+    /// Stable install ID to update
+    #[arg(long = "install-id")]
+    install_id: String,
     /// Ref override (branch, tag, or full 40-hex SHA); GitHub sources only
     #[arg(long = "ref")]
     reference: Option<String>,
@@ -493,11 +498,11 @@ fn registry_commit_failed(
     ))
 }
 
-/// The default alias: the profile name, or the lowercased basename of the
-/// agent directory for explicit/ambient agent-dir targets.
-fn default_alias(target: &profiles::ResolvedTarget) -> Result<String, CliError> {
+/// The default install ID: the profile name, or the lowercased basename
+/// of the agent directory for explicit/ambient agent-dir targets.
+fn default_install_id(target: &profiles::ResolvedTarget) -> Result<String, CliError> {
     if let Some(profile) = &target.profile {
-        // Registry aliases accept only the lowercase slug grammar.
+        // Registry install IDs accept only the lowercase slug grammar.
         return Ok(profile.to_ascii_lowercase());
     }
     let basename = target
@@ -507,25 +512,25 @@ fn default_alias(target: &profiles::ResolvedTarget) -> Result<String, CliError> 
         .filter(|name| !name.is_empty())
         .ok_or_else(|| {
             CliError::Usage(format!(
-                "cannot derive a default alias from agent directory '{}'; \
-                 pass --alias NAME explicitly",
+                "cannot derive a default install ID from agent directory '{}'; \
+                 pass --install-id NAME explicitly",
                 target.agent_dir.display()
             ))
         })?;
     Ok(basename.to_ascii_lowercase())
 }
 
-/// Which ownership manifest an install under `alias` owns at `agent_dir`:
-/// an already-registered alias keeps its recorded slot; a new alias owns
-/// the legacy per-agent manifest only when no other alias targets the
-/// directory, else its own per-alias manifest, so two aliases never share
-/// one ownership record.
+/// Which ownership manifest an install under `install_id` owns at
+/// `agent_dir`: an already-registered install ID keeps its recorded
+/// slot; a new install ID owns the legacy per-agent manifest only when
+/// no other install targets the directory, else its own per-install
+/// manifest, so two installs never share one ownership record.
 fn manifest_slot_for(
     registry_doc: &registry::Registry,
-    alias: &str,
+    install_id: &str,
     agent_dir: &Path,
 ) -> state::ManifestSlot {
-    if let Some(existing) = registry_doc.get(alias) {
+    if let Some(existing) = registry_doc.get(install_id) {
         return existing.manifest_slot;
     }
     if registry_doc
@@ -659,12 +664,12 @@ fn parse_semver(raw: &str) -> Result<semver::Version, String> {
     })
 }
 
-/// Find an executable regular file named exactly `alias` on PATH without
-/// spawning a process: a launcher with the alias's name would shadow (or be
-/// shadowed by) the alias the user just chose. Symlinks resolving to an
-/// executable regular file count; directories, non-executable files,
-/// unreadable candidates, and an absent PATH do not. The first match in
-/// PATH order is returned.
+/// Find an executable regular file named exactly like the requested shell
+/// `alias` on PATH without spawning a process: a launcher with the shell
+/// alias's name would shadow (or be shadowed by) the alias the user just
+/// chose. Symlinks resolving to an executable regular file count;
+/// directories, non-executable files, unreadable candidates, and an
+/// absent PATH do not. The first match in PATH order is returned.
 #[cfg(unix)]
 fn path_executable_collision(alias: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
@@ -690,7 +695,8 @@ fn path_executable_collision(_alias: &str) -> Option<PathBuf> {
     None
 }
 
-/// The refusal for a new alias whose name is already an executable on PATH.
+/// The refusal for a requested shell alias whose name is already an
+/// executable on PATH.
 fn path_collision_error(alias: &str, colliding: &Path) -> CliError {
     CliError::Usage(format!(
         "alias '{alias}' collides with the executable '{}' already on \
@@ -700,7 +706,7 @@ fn path_collision_error(alias: &str, colliding: &Path) -> CliError {
 }
 
 /// Enrich a refused install with recovery guidance when a collision
-/// diagnostic names an owner: the collision error carries the aliases
+/// diagnostic names an owner: the collision error carries the install IDs
 /// recorded as owning the colliding files, and the guidance names the
 /// first listed owner whose registry entry targets the same agent
 /// directory under a different topology. It is a no-op for every other
@@ -711,7 +717,7 @@ fn path_collision_error(alias: &str, colliding: &Path) -> CliError {
 fn cross_topology_guidance(
     exc: CliError,
     registry_doc: &registry::Registry,
-    alias: &str,
+    install_id: &str,
     topology: &str,
     agent_dir: &Path,
 ) -> CliError {
@@ -720,33 +726,34 @@ fn cross_topology_guidance(
         other => return other,
     };
     // The owners come from the collision diagnostics themselves, so the
-    // guidance can never name an alias that owns none of the colliding
-    // files. An owner whose registration changed (different target, or
-    // the same topology the user requested) is not a recovery anchor.
-    let owner = owners.iter().find_map(|owner_alias| {
-        let entry = registry_doc.get(owner_alias)?;
-        (owner_alias.as_str() != alias
+    // guidance can never name an install ID that owns none of the
+    // colliding files. An owner whose registration changed (different
+    // target, or the same topology the user requested) is not a recovery
+    // anchor.
+    let owner = owners.iter().find_map(|owner_install_id| {
+        let entry = registry_doc.get(owner_install_id)?;
+        (owner_install_id.as_str() != install_id
             && entry.agent_dir == agent_dir
             && entry.topology != topology)
-            .then_some((owner_alias, entry))
+            .then_some((owner_install_id, entry))
     });
-    let Some((owner_alias, owner_entry)) = owner else {
+    let Some((owner_install_id, owner_entry)) = owner else {
         return CliError::Usage(message);
     };
     CliError::Usage(format!(
         "{message}\n\
          guidance: '{owner_topology}' is already installed at {target} \
-         under alias '{owner_alias}'; the requested topology is \
+         under install ID '{owner_install_id}'; the requested topology is \
          '{topology}'.\n\
          - To keep both topologies, install '{topology}' into a \
          separate target instead: pass --profile {topology} (or \
          --agent-dir PATH) so the two installs do not share files.\n\
          - To update the existing '{owner_topology}' installation, \
-         run: omp-topology update --alias {owner_alias}. This keeps \
-         '{owner_topology}'; it does not install '{topology}'.",
+         run: omp-topology update --install-id {owner_install_id}. This \
+         keeps '{owner_topology}'; it does not install '{topology}'.",
         owner_topology = owner_entry.topology,
         target = agent_dir.display(),
-        owner_alias = owner_alias,
+        owner_install_id = owner_install_id,
         topology = topology,
     ))
 }
@@ -756,92 +763,100 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     let anchor = state_anchor()?;
     // Validate values derivable without resolving an OMP profile first:
     // `omp --profile NAME config path` can create a missing profile dir.
-    if let Some(alias) = args.alias.as_deref() {
-        registry::validate_alias(alias)?;
+    if let Some(install_id) = args.install_id.as_deref() {
+        registry::validate_alias(install_id)?;
     } else if let Some(profile) = args.profile.as_deref() {
         registry::validate_alias(&profile.to_ascii_lowercase())?;
     }
-    // Load the registry before target resolution so the new-alias PATH
-    // preflight below can refuse a colliding alias before
-    // `profiles::resolve_target` runs `omp --profile NAME config path`,
-    // which creates a missing profile directory.
     let registry_doc = registry::load_registry(&anchor)?;
-    // The alias is derivable before target resolution unless it defaults
-    // from an explicit --agent-dir basename (that resolution is
-    // non-mutating, so its preflight runs after resolution below). The
-    // profile-derived defaults match `default_alias`: the explicit or
-    // ambient profile name lowercased.
-    let pre_alias: Option<String> = match &args.alias {
-        Some(alias) => Some(alias.clone()),
-        None => match args.profile.as_deref() {
-            Some(profile) => Some(profile.to_ascii_lowercase()),
-            None if args.agent_dir.is_none() => {
-                let alias = profiles::active_profile_name().to_ascii_lowercase();
-                registry::validate_alias(&alias)?;
-                Some(alias)
-            }
-            None => None,
-        },
-    };
-    // A *new* alias must not collide with an executable already on PATH:
-    // refuse before target resolution, source resolution, cache creation,
-    // or any state or target mutation. A reinstall under an existing alias
-    // is an upsert and is never re-checked.
-    if let Some(alias) = pre_alias.as_deref()
-        && registry_doc.get(alias).is_none()
-        && let Some(colliding) = path_executable_collision(alias)
-    {
-        return Err(path_collision_error(alias, &colliding));
-    }
     // --profile and --agent-dir are mutually exclusive (checked inside);
-    // an alias-only invocation targets the ambient profile. A dry run is
+    // a profile-less invocation targets the ambient profile. A dry run is
     // read-only, so its target resolution must not create a missing
     // profile directory the way `omp --profile NAME config path` does.
     let target_opts = profiles::TargetOptions {
         profile: args.profile.as_deref(),
         agent_dir: args.agent_dir.as_deref(),
     };
+    // The requested shell alias must not collide with an executable
+    // already on PATH: refuse before source resolution, cache creation,
+    // or any state or target mutation. The registry install ID is never
+    // PATH-preflighted; only the executable name the shell alias would
+    // shadow is checked. The single allowed collision is a
+    // same-install-ID, same-target, same-topology upsert reusing its own
+    // shell alias: the executable on PATH is the launcher that install
+    // created, so the reinstall must not refuse itself. --alias requires
+    // --profile, so the candidate install ID is derivable without
+    // resolving the target, and a registry miss or topology mismatch
+    // refuses without invoking omp at all; only a registered
+    // same-topology candidate probes the target, and the probe is the
+    // read-only resolution — never the mutating `omp --profile NAME
+    // config path` — so every refusal here stays side-effect free. A dry
+    // run reuses the probed target instead of resolving twice.
+    let mut alias_probe = None;
+    if let Some(shell_alias) = args.alias.as_deref()
+        && let Some(colliding) = path_executable_collision(shell_alias)
+    {
+        let candidate_install_id = match &args.install_id {
+            Some(install_id) => Some(install_id.clone()),
+            None => args
+                .profile
+                .as_deref()
+                .map(|profile| profile.to_ascii_lowercase()),
+        };
+        let is_upsert = match candidate_install_id
+            .as_deref()
+            .and_then(|install_id| registry_doc.get(install_id))
+        {
+            Some(existing) if existing.topology == args.topology => {
+                let probe = profiles::resolve_target_read_only(&target_opts)?;
+                if probe.agent_dir == existing.agent_dir {
+                    alias_probe = Some(probe);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if !is_upsert {
+            return Err(path_collision_error(shell_alias, &colliding));
+        }
+    }
     let target = if args.dry_run {
-        profiles::resolve_target_read_only(&target_opts)?
+        match alias_probe {
+            Some(probe) => probe,
+            None => profiles::resolve_target_read_only(&target_opts)?,
+        }
     } else {
         profiles::resolve_target(&target_opts)?
     };
-    let alias = match &args.alias {
-        Some(alias) => alias.clone(),
-        None => default_alias(&target)?,
+    let install_id = match &args.install_id {
+        Some(install_id) => install_id.clone(),
+        None => default_install_id(&target)?,
     };
-    // Validate the alias and settle conflicts before any side effect: a
-    // reinstall under the same alias for the same target is an upsert; an
-    // alias that maps elsewhere is refused. Several aliases may share one
-    // agent directory: the first alias owns the legacy per-agent
-    // manifest.json, every additional alias owns its per-alias
-    // manifests/<alias>.json, so ownership state is never shared between
-    // aliases.
-    registry::validate_alias(&alias)?;
-    if let Some(existing) = registry_doc.get(&alias)
+    // Validate the install ID and settle conflicts before any side
+    // effect: a reinstall under the same install ID for the same target
+    // is an upsert; an install ID that maps elsewhere is refused. Several
+    // install IDs may share one agent directory: the first install ID
+    // owns the legacy per-agent manifest.json, every additional install
+    // owns its per-install manifests/<id>.json, so ownership state is
+    // never shared between installs.
+    registry::validate_alias(&install_id)?;
+    if let Some(existing) = registry_doc.get(&install_id)
         && (existing.agent_dir != target.agent_dir || existing.topology != args.topology)
     {
         return Err(CliError::Usage(format!(
-            "alias '{alias}' is already registered for '{}' in {}; it \
+            "install ID '{install_id}' is already registered for '{}' in {}; it \
              cannot be reused for '{}' in {}. To update the existing \
-             alias, rerun install with its registered topology and \
-             target; otherwise choose another --alias",
+             install, rerun install with its registered topology and \
+             target; otherwise choose another --install-id",
             existing.topology,
             existing.agent_dir.display(),
             args.topology,
             target.agent_dir.display()
         )));
     }
-    // The same PATH preflight for an alias that only became known with the
-    // resolved target (the explicit --agent-dir default); aliases already
-    // preflighted above are not re-checked.
-    if pre_alias.as_deref() != Some(alias.as_str())
-        && registry_doc.get(&alias).is_none()
-        && let Some(colliding) = path_executable_collision(&alias)
-    {
-        return Err(path_collision_error(&alias, &colliding));
-    }
-    let manifest_slot = manifest_slot_for(&registry_doc, &alias, &target.agent_dir);
+    let manifest_slot = manifest_slot_for(&registry_doc, &install_id, &target.agent_dir);
 
     // Real installs from an explicit source cache persistently; dry runs
     // clone into a temporary directory that SourceCheckout removes on drop.
@@ -870,7 +885,7 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
 
     let agent_dir_text = target.agent_dir.to_string_lossy().into_owned();
     let manifest_path =
-        state::manifest_path_for_slot(&target.agent_dir, &anchor, &alias, manifest_slot)?;
+        state::manifest_path_for_slot(&target.agent_dir, &anchor, &install_id, manifest_slot)?;
     // Config handling for this command only; never remembered.
     let config_mode = config_mode_from_flags(
         args.config_merge,
@@ -922,7 +937,7 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
         return Err(cross_topology_guidance(
             exc,
             &registry_doc,
-            &alias,
+            &install_id,
             &args.topology,
             &target.agent_dir,
         ));
@@ -968,14 +983,14 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     // registry.
     let (locked_doc, manifest_slot, manifest_path) = if _lock.is_some() {
         let locked_doc = registry::load_registry(&anchor)?;
-        if let Some(existing) = locked_doc.get(&alias)
+        if let Some(existing) = locked_doc.get(&install_id)
             && (existing.agent_dir != target.agent_dir || existing.topology != args.topology)
         {
             let exc = CliError::Usage(format!(
-                "alias '{alias}' is already registered for '{}' in {}; it \
+                "install ID '{install_id}' is already registered for '{}' in {}; it \
                  cannot be reused for '{}' in {}. To update the existing \
-                 alias, rerun install with its registered topology and \
-                 target; otherwise choose another --alias",
+                 install, rerun install with its registered topology and \
+                 target; otherwise choose another --install-id",
                 existing.topology,
                 existing.agent_dir.display(),
                 args.topology,
@@ -992,8 +1007,8 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
             preserve_lines(args.json, &out);
             return Err(exc);
         }
-        let slot = manifest_slot_for(&locked_doc, &alias, &target.agent_dir);
-        let path = state::manifest_path_for_slot(&target.agent_dir, &anchor, &alias, slot)?;
+        let slot = manifest_slot_for(&locked_doc, &install_id, &target.agent_dir);
+        let path = state::manifest_path_for_slot(&target.agent_dir, &anchor, &install_id, slot)?;
         (Some(locked_doc), slot, path)
     } else {
         (None, manifest_slot, manifest_path)
@@ -1009,7 +1024,7 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
             dry_run: args.dry_run,
             config_mode,
             manifest_path: Some(&manifest_path),
-            alias: Some(&alias),
+            install_id: Some(&install_id),
             expected_version: args.version.as_ref(),
         },
         &mut out,
@@ -1034,7 +1049,7 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
             return Err(cross_topology_guidance(
                 exc,
                 locked_doc.as_ref().unwrap_or(&registry_doc),
-                &alias,
+                &install_id,
                 &args.topology,
                 &target.agent_dir,
             ));
@@ -1054,10 +1069,20 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     }
     if args.dry_run {
         out.push(format!(
-            "dry-run: would install '{}' into {} as alias '{alias}'",
+            "dry-run: would install '{}' into {} as install ID '{install_id}'",
             args.topology,
             target.agent_dir.display()
         ));
+        // The shell alias is handed to the real omp only on a real
+        // install; the dry-run plan reports it without invoking omp or
+        // touching any shell configuration.
+        if let Some(profile) = args.profile.as_deref()
+            && let Some(shell_alias) = args.alias.as_deref()
+        {
+            out.push(format!(
+                "Would create OMP shell alias '{shell_alias}' for profile '{profile}'"
+            ));
+        }
         return finish("install", args.json, out, 0);
     }
 
@@ -1079,12 +1104,12 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
 
     // Re-registering an unchanged managed target must not churn installer
     // state: the entry inserted below starts as a fresh stamp, but the
-    // original registration time survives when the alias already maps to
-    // this same agent directory and topology, so an unchanged reinstall
+    // original registration time survives when the install ID already maps
+    // to this same agent directory and topology, so an unchanged reinstall
     // serializes identical registry bytes (the state snapshot the installer
     // keeps is byte-compared across reinstalls).
     let mut entry_for_merge = entry.clone();
-    // A reinstall may move the alias from source A to source B; both
+    // A reinstall may move the install ID from source A to source B; both
     // caches are pruned after the commit, each retaining the commits the
     // post-insert registry still references.
     let mut sources_to_prune: Vec<SourceSpec> = Vec::new();
@@ -1093,11 +1118,11 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     // precondition) instead of with_registry acquiring a second one.
     let merge_result = (|| -> Result<(), CliError> {
         let mut doc = registry::load_registry(&anchor)?;
-        let old_source = doc.get(&alias).map(|existing| existing.source.clone());
-        if let Some(existing) = doc.get(&alias) {
+        let old_source = doc.get(&install_id).map(|existing| existing.source.clone());
+        if let Some(existing) = doc.get(&install_id) {
             if existing.agent_dir != target.agent_dir || existing.topology != args.topology {
                 return Err(CliError::Registry(format!(
-                    "alias '{alias}' changed concurrently (now '{}' \
+                    "install ID '{install_id}' changed concurrently (now '{}' \
                      in {}); refusing to overwrite it",
                     existing.topology,
                     existing.agent_dir.display()
@@ -1105,7 +1130,7 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
             }
             entry_for_merge.installed_at = existing.installed_at.clone();
         }
-        doc.insert(alias.clone(), entry_for_merge)?;
+        doc.insert(install_id.clone(), entry_for_merge)?;
         for source in old_source.into_iter().chain([entry.source.clone()]) {
             if matches!(source, SourceSpec::GitHub { .. }) && !sources_to_prune.contains(&source) {
                 sources_to_prune.push(source);
@@ -1137,38 +1162,66 @@ fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
     }
 
     out.push(format!(
-        "recorded alias '{alias}' for '{}' in {}",
+        "recorded install ID '{install_id}' for '{}' in {}",
         args.topology,
         target.agent_dir.display()
     ));
 
     // Bounded cache cleanup after the registry mutation, per GitHub
     // source involved in the install, retaining every commit still
-    // referenced by the post-insert registry; a prune failure is a
-    // warning, never an install failure.
+    // referenced by the post-insert registry. Run this before optional
+    // shell-alias delegation so an OMP alias failure cannot skip cleanup;
+    // a prune failure is a warning, never an install failure.
     for source in sources_to_prune {
         prune_install_source(&anchor, &source, &BTreeSet::new(), &mut out);
     }
+
+    // The topology is installed and the registry commit succeeded, so
+    // the shell alias is handed to the real omp — it owns its own rc-file
+    // syntax, which this installer never writes. Only an explicit
+    // --profile together with an explicit --alias delegates: the shell
+    // alias is independent of the registry install ID, and installs
+    // without --alias keep their registry-only semantics. Unreachable on
+    // dry runs, which returned before the registry commit above.
+    if let Some(profile) = args.profile.as_deref()
+        && let Some(shell_alias) = args.alias.as_deref()
+        && let Err(exc) = profiles::create_profile_alias(profile, shell_alias)
+    {
+        // The install and the registry commit succeeded and are not
+        // rolled back; preserve the accumulated human lines (stderr in
+        // JSON mode, so no OMP stdout can pollute the JSON document) and
+        // name the exact manual recovery command.
+        preserve_lines(args.json, &out);
+        return Err(CliError::Usage(format!(
+            "installed '{}' into {} as install ID '{install_id}' and recorded it \
+             in the registry, but the shell alias could not be created: {exc}\n\
+             the topology install is complete; recover by running \
+             'omp --profile {profile} --alias {shell_alias}' manually",
+            args.topology,
+            target.agent_dir.display(),
+        )));
+    }
+
     finish("install", args.json, out, 0)
 }
 
 fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
     let anchor = state_anchor()?;
-    if args.alias.is_some() && (args.profile.is_some() || args.agent_dir.is_some()) {
+    if args.install_id.is_some() && (args.profile.is_some() || args.agent_dir.is_some()) {
         return Err(CliError::Usage(
-            "--alias cannot be combined with --profile or --agent-dir: the \
-             alias already selects the target and topology"
+            "--install-id cannot be combined with --profile or --agent-dir: \
+             the install ID already selects the target and topology"
                 .to_string(),
         ));
     }
 
     // Read-only registry lookup to select the removal target.
     let registry_doc = registry::load_registry(&anchor)?;
-    let (topology, agent_dir, matching_aliases): (String, PathBuf, Vec<String>) =
-        if let Some(alias) = &args.alias {
-            let entry = registry_doc.get(alias).ok_or_else(|| {
+    let (topology, agent_dir, matching_install_ids): (String, PathBuf, Vec<String>) =
+        if let Some(install_id) = &args.install_id {
+            let entry = registry_doc.get(install_id).ok_or_else(|| {
                 CliError::Usage(format!(
-                    "unknown alias '{alias}' (see the registry under {})",
+                    "unknown install ID '{install_id}' (see the registry under {})",
                     registry::registry_path(&anchor)
                         .map(|path| path.display().to_string())
                         .unwrap_or_else(|_| "the state root".to_string())
@@ -1178,21 +1231,22 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
                 && topology != &entry.topology
             {
                 return Err(CliError::Usage(format!(
-                    "topology '{topology}' does not match alias '{alias}' \
-                     (installed topology '{}'); pass -t {} or drop --alias",
+                    "topology '{topology}' does not match install ID \
+                     '{install_id}' (installed topology '{}'); pass -t {} or \
+                     drop --install-id",
                     entry.topology, entry.topology
                 )));
             }
             (
                 entry.topology.clone(),
                 entry.agent_dir.clone(),
-                vec![alias.clone()],
+                vec![install_id.clone()],
             )
         } else {
             let Some(topology) = &args.topology else {
                 return Err(CliError::Usage(
                     "remove needs a topology: pass -t NAME, or select an \
-                     install with --alias NAME"
+                     install with --install-id NAME"
                         .to_string(),
                 ));
             };
@@ -1215,68 +1269,76 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
                 .filter(|(_, entry)| {
                     entry.agent_dir == target.agent_dir && entry.topology == *topology
                 })
-                .map(|(alias, _)| alias.clone())
+                .map(|(install_id, _)| install_id.clone())
                 .collect();
             (topology.clone(), target.agent_dir.clone(), matching)
         };
 
     // Resolve which ownership manifest this removal operates on: an
-    // explicit alias uses its recorded slot; a direct target with exactly
-    // one matching alias uses that alias's slot; a direct target with
-    // several matching aliases is ambiguous and must name one; no matching
-    // alias falls back to the legacy per-agent manifest. The resolved
-    // alias also scopes recovery-marker cleanup so a sibling alias's
-    // retained rollback snapshot is never cleared.
-    let (manifest_path, scope_alias): (PathBuf, Option<&str>) = if let Some(alias) = &args.alias {
-        let entry = registry_doc.get(alias).expect("validated above");
+    // explicit install ID uses its recorded slot; a direct target with
+    // exactly one matching install ID uses that install's slot; a direct
+    // target with several matching install IDs is ambiguous and must name
+    // one; no matching install falls back to the legacy per-agent
+    // manifest. The resolved install ID also scopes recovery-marker
+    // cleanup so a sibling install's retained rollback snapshot is never
+    // cleared.
+    let (manifest_path, scope_install_id): (PathBuf, Option<&str>) = if let Some(install_id) =
+        &args.install_id
+    {
+        let entry = registry_doc.get(install_id).expect("validated above");
         (
-            state::manifest_path_for_slot(&agent_dir, &anchor, alias, entry.manifest_slot)?,
-            Some(alias.as_str()),
+            state::manifest_path_for_slot(&agent_dir, &anchor, install_id, entry.manifest_slot)?,
+            Some(install_id.as_str()),
         )
     } else {
-        match matching_aliases.len() {
+        match matching_install_ids.len() {
             0 => (state::manifest_path(&agent_dir, &anchor)?, None),
             1 => {
-                let alias = &matching_aliases[0];
-                let entry = registry_doc.get(alias).expect("collected above");
+                let install_id = &matching_install_ids[0];
+                let entry = registry_doc.get(install_id).expect("collected above");
                 (
-                    state::manifest_path_for_slot(&agent_dir, &anchor, alias, entry.manifest_slot)?,
-                    Some(alias.as_str()),
+                    state::manifest_path_for_slot(
+                        &agent_dir,
+                        &anchor,
+                        install_id,
+                        entry.manifest_slot,
+                    )?,
+                    Some(install_id.as_str()),
                 )
             }
             _ => {
                 return Err(CliError::Usage(format!(
-                    "multiple aliases ({}) target {} for topology '{topology}'; \
-                     pass --alias NAME to select one",
-                    matching_aliases.join(", "),
+                    "multiple install IDs ({}) target {} for topology \
+                         '{topology}'; pass --install-id NAME to select one",
+                    matching_install_ids.join(", "),
                     agent_dir.display()
                 )));
             }
         }
     };
 
-    // Stale alias: the registry still records the install but the target
-    // has no ownership manifest (e.g. a previous removal succeeded while
-    // its registry write failed). Reconcile the registry directly and
-    // never touch target files; remove::run would refuse here, and
+    // Stale install ID: the registry still records the install but the
+    // target has no ownership manifest (e.g. a previous removal succeeded
+    // while its registry write failed). Reconcile the registry directly
+    // and never touch target files; remove::run would refuse here, and
     // dry-run stays read-only.
-    if args.alias.is_some() {
+    if args.install_id.is_some() {
         match state::load_manifest_at(&manifest_path, &anchor) {
             Ok(None) => {
                 let mut out = Vec::new();
                 if args.dry_run {
                     out.push(format!(
-                        "dry-run: alias '{}' has no ownership manifest in {}; \
+                        "dry-run: install ID '{}' has no ownership manifest in {}; \
                          would remove the stale registry entry only",
-                        args.alias.as_deref().expect("checked above"),
+                        args.install_id.as_deref().expect("checked above"),
                         agent_dir.display()
                     ));
                     return finish("remove", args.json, out, 0);
                 }
                 out.push(format!(
-                    "alias '{}' has no ownership manifest in {}; removing the \
-                     stale registry entry only",
-                    args.alias.as_deref().expect("checked above"),
+                    "install ID '{}' has no ownership manifest in {}; removing \
+                     the stale registry entry only",
+                    args.install_id.as_deref().expect("checked above"),
                     agent_dir.display()
                 ));
                 // Reconcile under the registry lock: the manifest absence
@@ -1285,7 +1347,7 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
                 // (marked Partial) instead of being unregistered.
                 let reconciliation = reconcile_removal(
                     &anchor,
-                    &matching_aliases,
+                    &matching_install_ids,
                     false,
                     RemovalScope {
                         topology: &topology,
@@ -1298,10 +1360,10 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
                 if !reconciliation.retained_aliases.is_empty() {
                     out.push(format!(
                         "note: a concurrent install recreated the ownership \
-                         manifest in {}; alias '{}' was retained as partial \
-                         instead of unregistered",
+                         manifest in {}; install ID '{}' was retained as \
+                         partial instead of unregistered",
                         agent_dir.display(),
-                        args.alias.as_deref().expect("checked above"),
+                        args.install_id.as_deref().expect("checked above"),
                     ));
                 }
                 prune_removed_sources(&anchor, reconciliation.pruned_sources, &mut out)?;
@@ -1322,7 +1384,7 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
             skills_dir: args.skills_dir.as_deref(),
             dry_run: args.dry_run,
             manifest_path: Some(&manifest_path),
-            alias: scope_alias,
+            install_id: scope_install_id,
         },
         &mut out,
     ) {
@@ -1361,7 +1423,7 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
     };
     let reconciliation = reconcile_removal(
         &anchor,
-        &matching_aliases,
+        &matching_install_ids,
         manifest_present,
         RemovalScope {
             topology: &topology,
@@ -1377,30 +1439,31 @@ fn cmd_remove(args: &RemoveArgs) -> Result<i32, CliError> {
 
 /// The outcome of a post-removal registry reconciliation.
 struct ReconciledRemoval {
-    /// Sources whose last referencing alias was unregistered; their
+    /// Sources whose last referencing install ID was unregistered; their
     /// caches may be pruned.
     pruned_sources: Vec<SourceSpec>,
-    /// Aliases removed from the registry.
+    /// Install IDs removed from the registry.
     removed_aliases: Vec<String>,
-    /// Aliases kept and marked `Partial` because an ownership manifest
-    /// was (re-)observed present — for stale aliases this includes the
-    /// manifest a concurrent reinstall recreated before the registry
-    /// lock was taken.
+    /// Install IDs kept and marked `Partial` because an ownership
+    /// manifest was (re-)observed present — for stale installs this
+    /// includes the manifest a concurrent reinstall recreated before the
+    /// registry lock was taken.
     retained_aliases: Vec<String>,
 }
 
-/// Reconcile the registry after a removal: drop aliases whose ownership
-/// manifest is gone, retain and mark `Partial` those whose manifest
-/// remains. Callers must only invoke this after the target question is
-/// settled (a successful `remove::run`, or a proven-absent manifest for a
-/// stale alias). When the caller observed the manifest *missing* (stale
-/// alias), the manifest presence is re-checked under the registry lock,
-/// immediately before the alias would be unregistered: a concurrent
-/// reinstall that recreated the manifest keeps the entry alive as
-/// `Partial` — a live installation is never unregistered. An unreadable
-/// manifest is treated as present, so uncertainty always retains the
-/// alias. On a registry failure the captured `out` lines are preserved
-/// and the error states the target state and recovery path.
+/// Reconcile the registry after a removal: drop install IDs whose
+/// ownership manifest is gone, retain and mark `Partial` those whose
+/// manifest remains. Callers must only invoke this after the target
+/// question is settled (a successful `remove::run`, or a proven-absent
+/// manifest for a stale install ID). When the caller observed the
+/// manifest *missing* (stale install ID), the manifest presence is
+/// re-checked under the registry lock, immediately before the install ID
+/// would be unregistered: a concurrent reinstall that recreated the
+/// manifest keeps the entry alive as `Partial` — a live installation is
+/// never unregistered. An unreadable manifest is treated as present, so
+/// uncertainty always retains the install ID. On a registry failure the
+/// captured `out` lines are preserved and the error states the target
+/// state and recovery path.
 struct RemovalScope<'a> {
     topology: &'a str,
     agent_dir: &'a Path,
@@ -1432,18 +1495,19 @@ fn reconcile_removal(
             };
             if entry.agent_dir.as_path() != agent_dir || entry.topology != topology {
                 return Err(CliError::Registry(format!(
-                    "alias '{alias}' changed concurrently (now '{}' in {}); \
-                     refusing to reconcile it",
+                    "install ID '{alias}' changed concurrently (now '{}' in \
+                     {}); refusing to reconcile it",
                     entry.topology,
                     entry.agent_dir.display()
                 )));
             }
-            // Stale alias: the manifest was observed missing before the
-            // registry lock existed. Re-check under the lock, right before
-            // unregistering: a concurrent reinstall may have recreated the
-            // manifest, and dropping the alias would orphan that live
-            // installation. An unreadable manifest also retains the alias
-            // (fail closed) but is not reported as a reinstall.
+            // Stale install ID: the manifest was observed missing before
+            // the registry lock existed. Re-check under the lock, right
+            // before unregistering: a concurrent reinstall may have
+            // recreated the manifest, and dropping the install ID would
+            // orphan that live installation. An unreadable manifest also
+            // retains the install ID (fail closed) but is not reported as
+            // a reinstall.
             let present = if manifest_present {
                 true
             } else {
@@ -1551,7 +1615,7 @@ fn cmd_profiles(args: &ProfilesArgs) -> Result<i32, CliError> {
                                 "exists": profile.exists,
                                 "managed": profile.managed.iter().map(|install| {
                                     json!({
-                                        "alias": install.alias,
+                                        "install_id": install.install_id,
                                         "topology": install.topology,
                                         "source": install.source.describe(),
                                     })
@@ -1571,8 +1635,8 @@ fn cmd_profiles(args: &ProfilesArgs) -> Result<i32, CliError> {
                     }
                     for install in &profile.managed {
                         println!(
-                            "    alias {}: {} (via {})",
-                            install.alias,
+                            "    install ID {}: {} (via {})",
+                            install.install_id,
                             install.topology,
                             install.source.describe()
                         );
@@ -1586,17 +1650,17 @@ fn cmd_profiles(args: &ProfilesArgs) -> Result<i32, CliError> {
 
 fn cmd_status(args: &StatusArgs) -> Result<i32, CliError> {
     let anchor = state_anchor()?;
-    if args.alias.is_some() && (args.profile.is_some() || args.agent_dir.is_some()) {
+    if args.install_id.is_some() && (args.profile.is_some() || args.agent_dir.is_some()) {
         return Err(CliError::Usage(
-            "--alias cannot be combined with --profile or --agent-dir: the \
-             alias already selects the target"
+            "--install-id cannot be combined with --profile or --agent-dir: \
+             the install ID already selects the target"
                 .to_string(),
         ));
     }
 
-    if let Some(alias) = &args.alias {
-        // Read-only alias lookup.
-        let report = status::alias_status(alias, &anchor)?;
+    if let Some(install_id) = &args.install_id {
+        // Read-only install ID lookup.
+        let report = status::alias_status(install_id, &anchor)?;
         return emit_status(&report, args.json);
     }
 
@@ -1615,15 +1679,15 @@ fn cmd_status(args: &StatusArgs) -> Result<i32, CliError> {
     match matching.len() {
         0 => emit_unmanaged(&target, &anchor, args.json),
         1 => {
-            let (alias, entry) = matching[0];
-            let report = status::status_for_entry(alias, entry, &anchor)?;
+            let (install_id, entry) = matching[0];
+            let report = status::status_for_entry(install_id, entry, &anchor)?;
             emit_status(&report, args.json)
         }
         _ => Err(CliError::Usage(format!(
-            "multiple aliases ({}) target {}; pass --alias NAME explicitly",
+            "multiple install IDs ({}) target {}; pass --install-id NAME explicitly",
             matching
                 .iter()
-                .map(|(alias, _)| alias.as_str())
+                .map(|(install_id, _)| install_id.as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
             target.agent_dir.display()
@@ -1657,11 +1721,11 @@ fn emit_unmanaged(
         match &manifest_topology {
             Some(topology) => {
                 println!("topology manifest: {topology}");
-                println!("registry alias: none");
+                println!("registry install ID: none");
             }
             None => println!(
-                "no registry alias manages this target and no ownership \
-                 manifest was found"
+                "no install ID manages this target and no ownership manifest \
+                 was found"
             ),
         }
     }
@@ -1693,7 +1757,7 @@ fn emit_status(report: &status::AliasStatus, json: bool) -> Result<i32, CliError
         print_json(&json!({
             "command": "status",
             "managed": true,
-            "alias": report.alias,
+            "install_id": report.install_id,
             "state": if report.state == InstallState::Installed { "installed" } else { "partial" },
             "agent_dir": report.agent_dir.display().to_string(),
             "profile": report.profile,
@@ -1708,7 +1772,7 @@ fn emit_status(report: &status::AliasStatus, json: bool) -> Result<i32, CliError
             "freshness": freshness,
         }))?;
     } else {
-        println!("alias: {}", report.alias);
+        println!("install ID: {}", report.install_id);
         println!(
             "state: {}",
             if report.state == InstallState::Installed {
@@ -1773,7 +1837,7 @@ fn cmd_update(args: &UpdateArgs) -> Result<i32, CliError> {
     let mut out = Vec::new();
     let code = match update::run(
         &update::UpdateOptions {
-            alias: &args.alias,
+            install_id: &args.install_id,
             reference: args.reference.as_deref(),
             source: args.source.as_deref(),
             version: args.version.as_ref(),
@@ -1793,10 +1857,10 @@ fn cmd_update(args: &UpdateArgs) -> Result<i32, CliError> {
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|_| "the state root".to_string());
             return Err(CliError::Registry(format!(
-                "update of alias '{}' failed: {exc}; if target mutation \
+                "update of install ID '{}' failed: {exc}; if target mutation \
                  started, the registry at {registry_path} remains marked \
-                 partial; re-run 'update --alias {}' to reconcile it",
-                args.alias, args.alias
+                 partial; re-run 'update --install-id {}' to reconcile it",
+                args.install_id, args.install_id
             )));
         }
     };
@@ -1903,7 +1967,7 @@ mod tests {
             assert_eq!(
                 registry.get(alias).map(|entry| entry.state),
                 Some(InstallState::Partial),
-                "recreated manifest must keep its registry alias marked partial"
+                "recreated manifest must keep its install ID marked partial"
             );
         });
     }
