@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Scope cross-alias skill ownership by the recorded skills root, so removing
+  one alias cannot retain or delete a same-named skill under another root.
+- Refuse replace-mode installs and updates that would overwrite or remove
+  config keys owned by another alias, including dry-run updates.
+
 ## [0.2.3] - 2026-11-25
 
 ### Changed

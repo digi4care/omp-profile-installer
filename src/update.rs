@@ -228,6 +228,30 @@ pub fn run(opts: &UpdateOptions<'_>, out: &mut Vec<String>) -> Result<i32, CliEr
         TopologySource::GitHub { .. } => None,
     };
 
+    // A replace-mode update swaps the whole active config: refuse before
+    // staging a Partial registry entry or taking the lock when the
+    // replacement would overwrite or remove config keys a sibling alias
+    // owns. install::run repeats the check under the lock before
+    // mutating, so ownership recorded in between still fails closed.
+    if matches!(opts.config_mode, crate::config_mode::ConfigMode::Replace)
+        && let Err(err) = install::preflight_replace_ownership(
+            &topology_dir,
+            opts.state_anchor,
+            &entry.agent_dir,
+            &manifest_path,
+        )
+    {
+        if !opts.dry_run {
+            prune_source_cache(
+                &source_spec,
+                resolved_commit.as_deref(),
+                opts.state_anchor,
+                out,
+            );
+        }
+        return Err(err);
+    }
+
     if opts.dry_run {
         // Plan only: no lock, no registry write, no target mutation —
         // install::run plans against the same ephemeral checkout.
