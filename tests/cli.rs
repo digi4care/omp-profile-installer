@@ -799,6 +799,165 @@ fn doctor_unknown_and_unregistered_data_are_distinguished_without_adoption() {
 }
 
 #[test]
+fn doctor_reports_stale_per_alias_manifest_with_registered_sibling() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("home/.omp/profiles/demo/agent");
+    write_cli_fixture_topology(&source_root);
+    install_cli_fixture(
+        &temp,
+        &source_root,
+        "registered-id",
+        &agent_dir,
+        Some("demo"),
+    );
+
+    let stale_topology = "cli-stale-fixture";
+    let stale_topology_root = source_root.join("topologies").join(stale_topology);
+    let stale_agent_root = stale_topology_root.join("agent");
+    fs::create_dir_all(stale_agent_root.join("skills"))
+        .expect("failed to create stale fixture topology");
+    fs::write(
+        stale_topology_root.join("topology.yml"),
+        "name: cli-stale-fixture\nversion: 1.0.0\ndescription: stale fixture\ninstallable: true\n",
+    )
+    .expect("failed to write stale fixture metadata");
+    fs::write(stale_agent_root.join("config.yml"), "stale_fixture: true\n")
+        .expect("failed to write stale fixture config");
+    fs::write(
+        stale_agent_root.join("skills/stale.md"),
+        b"stale fixture skill\n",
+    )
+    .expect("failed to write stale fixture skill");
+
+    let source_arg = source_root.to_string_lossy().into_owned();
+    let mut install = temp.cli_command(Path::new(env!("CARGO_MANIFEST_DIR")));
+    install.args([
+        "install",
+        "--topology",
+        stale_topology,
+        "--source",
+        &source_arg,
+        "--install-id",
+        "stale-id",
+        "--profile",
+        "demo",
+    ]);
+    temp.configure_fake_omp(&mut install, &agent_dir, true);
+    let installed = install
+        .output()
+        .expect("failed to execute stale fixture install");
+    assert!(
+        installed.status.success(),
+        "stale fixture install failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&installed.stdout),
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    let state_root = temp.0.join("state");
+    let registry_path = state_root.join("omp-topology/registry.json");
+    let registry_bytes = fs::read(&registry_path).expect("fixture registry is missing");
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(&registry_bytes).expect("fixture registry is invalid JSON");
+    assert_eq!(
+        registry["aliases"]["registered-id"]["agent_dir"],
+        fs::canonicalize(&agent_dir)
+            .expect("fixture agent dir is missing")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        registry["aliases"]["stale-id"]["agent_dir"],
+        registry["aliases"]["registered-id"]["agent_dir"],
+        "fixture installs did not share their agent directory"
+    );
+    assert_eq!(
+        registry["aliases"]["stale-id"]["profile"], "demo",
+        "stale fixture install did not use the shared profile"
+    );
+
+    let legacy_manifest = cli_manifest_path(&temp, &agent_dir);
+    let stale_manifest = legacy_manifest
+        .parent()
+        .expect("fixture manifest has no parent")
+        .join("manifests/stale-id.json");
+    let stale_manifest_bytes =
+        fs::read(&stale_manifest).expect("stale per-install manifest is missing");
+    registry["aliases"]
+        .as_object_mut()
+        .expect("fixture registry aliases are missing")
+        .remove("stale-id")
+        .expect("stale fixture install ID is missing from registry");
+    fs::write(
+        &registry_path,
+        serde_json::to_vec_pretty(&registry).expect("failed to encode stale fixture registry"),
+    )
+    .expect("failed to remove stale fixture ID from registry");
+    let orphaned_registry_bytes =
+        fs::read(&registry_path).expect("orphaned fixture registry is missing");
+    let before = snapshot_roots(&[state_root, agent_dir.clone()]);
+
+    let agent_arg = agent_dir.to_string_lossy().into_owned();
+    let outputs = [
+        run_doctor(&temp, &["doctor", "--json"]),
+        run_doctor(&temp, &["doctor", "--profile", "demo", "--json"]),
+        run_doctor(&temp, &["doctor", "--agent-dir", &agent_arg, "--json"]),
+    ];
+    for (scan, output) in ["default", "profile", "agent-dir"].into_iter().zip(outputs) {
+        let report = doctor_json(&output, 0);
+        assert_eq!(
+            report["status"], "warning",
+            "{scan} scan did not report only a warning: {report}"
+        );
+        assert_eq!(
+            report["omp"]["status"], "available",
+            "{scan} scan did not see healthy OMP: {report}"
+        );
+        assert!(
+            report["installs"]
+                .as_array()
+                .is_some_and(|installs| installs
+                    .iter()
+                    .any(|install| install["install_id"] == "registered-id"
+                        && install["status"] == "ok")),
+            "{scan} scan omitted the healthy registered sibling: {report}"
+        );
+        let findings = report["findings"]
+            .as_array()
+            .expect("doctor findings are not an array");
+        assert!(
+            !findings.is_empty()
+                && findings
+                    .iter()
+                    .all(|finding| finding["severity"] == "warning"),
+            "{scan} scan reported an error or omitted its warning finding: {report}"
+        );
+        let warning_text = serde_json::to_string(findings)
+            .expect("failed to encode doctor warning findings")
+            .to_ascii_lowercase();
+        assert!(
+            warning_text.contains("stale-id") && warning_text.contains(stale_topology),
+            "{scan} scan did not identify the stale install ID and topology in a warning: {report}"
+        );
+        assert_eq!(
+            snapshot_roots(&[temp.0.join("state"), agent_dir.clone()]),
+            before,
+            "{scan} scan changed registry, manifests, or target files"
+        );
+        assert_eq!(
+            fs::read(&registry_path).expect("doctor changed the registry"),
+            orphaned_registry_bytes,
+            "{scan} scan changed registry bytes"
+        );
+        assert_eq!(
+            fs::read(&stale_manifest).expect("doctor removed the stale manifest"),
+            stale_manifest_bytes,
+            "{scan} scan changed stale manifest bytes"
+        );
+    }
+}
+
+#[test]
 fn doctor_registry_and_manifest_errors_are_json_and_read_only() {
     let temp = TestDir::new();
     let source_root = temp.0.join("source");

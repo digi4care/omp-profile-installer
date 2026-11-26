@@ -5,14 +5,16 @@
 //! and ownership manifests. It never evaluates shell startup files or repairs
 //! state.
 
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{Value as Json, json};
 
+use crate::anchored::{EntryKind, RootFd, StrictRoot};
 use crate::error::CliError;
 use crate::profiles::{self, TargetOptions};
-use crate::registry::{self, InstallState, RegistryEntry};
+use crate::registry::{self, InstallState, Registry, RegistryEntry};
 use crate::{state, topology};
 
 pub(crate) fn run(
@@ -69,21 +71,18 @@ pub(crate) fn run(
                     format!("registry could not be read: {error}"),
                 ),
                 Ok(registry) => {
-                    let mut matched = false;
                     for (id, entry) in &registry.aliases {
                         if entry.agent_dir == target.agent_dir {
-                            matched = true;
                             inspect_entry(&mut report, id, entry, state_anchor);
                         }
                     }
-                    if !matched {
-                        inspect_unregistered(
-                            &mut report,
-                            &target.agent_dir,
-                            target.profile.as_deref(),
-                            state_anchor,
-                        );
-                    }
+                    inspect_unregistered_manifests(
+                        &mut report,
+                        &target.agent_dir,
+                        target.profile.as_deref(),
+                        &registry,
+                        state_anchor,
+                    );
                 }
             },
         }
@@ -114,14 +113,13 @@ pub(crate) fn run(
                             .collect::<Vec<_>>();
                         report["profiles"] = json!(rows);
                         for item in profiles {
-                            if item.managed.is_empty() && item.exists {
-                                inspect_unregistered(
-                                    &mut report,
-                                    &item.agent_dir,
-                                    item.name.as_deref(),
-                                    state_anchor,
-                                );
-                            }
+                            inspect_unregistered_manifests(
+                                &mut report,
+                                &item.agent_dir,
+                                item.name.as_deref(),
+                                &registry,
+                                state_anchor,
+                            );
                         }
                     }
                     Err(error) => finding(
@@ -289,35 +287,252 @@ fn append_install(
         }));
 }
 
-fn inspect_unregistered(
+fn inspect_unregistered_manifests(
     report: &mut Json,
     agent_dir: &Path,
     profile: Option<&str>,
+    registry: &Registry,
     state_anchor: &Path,
 ) {
-    match state::load_manifest(agent_dir, state_anchor) {
+    let state_root = match state::state_root(state_anchor) {
+        Ok(root) => root,
+        Err(error) => {
+            finding(
+                report,
+                "error",
+                "manifest_error",
+                format!("ownership state could not be inspected: {error}"),
+            );
+            return;
+        }
+    };
+    let root = match RootFd::open_strict_root(&state_root) {
+        Ok(StrictRoot::Pinned(root)) => root,
+        Ok(StrictRoot::Absent) => return,
+        Ok(StrictRoot::Symlink) => {
+            finding(
+                report,
+                "error",
+                "manifest_error",
+                format!(
+                    "ownership state directory '{}' is a symlink",
+                    state_root.display()
+                ),
+            );
+            return;
+        }
+        Err(error) => {
+            finding(
+                report,
+                "error",
+                "manifest_error",
+                format!(
+                    "ownership state directory '{}' could not be inspected: {error}",
+                    state_root.display()
+                ),
+            );
+            return;
+        }
+    };
+
+    let state_dir = match state::agent_state_dir(agent_dir, state_anchor) {
+        Ok(path) => path,
+        Err(error) => {
+            finding(
+                report,
+                "error",
+                "manifest_error",
+                format!(
+                    "ownership state for '{}' could not be inspected: {error}",
+                    agent_dir.display()
+                ),
+            );
+            return;
+        }
+    };
+    let state_dir_rel = match state_dir
+        .strip_prefix(&state_root)
+        .ok()
+        .and_then(Path::to_str)
+    {
+        Some(path) => path.to_string(),
+        None => {
+            finding(
+                report,
+                "error",
+                "manifest_error",
+                format!(
+                    "ownership state directory '{}' is outside '{}'",
+                    state_dir.display(),
+                    state_root.display()
+                ),
+            );
+            return;
+        }
+    };
+    match root.kind(&state_dir_rel) {
+        Ok(Some(EntryKind::Directory)) => {}
+        Ok(None) => return,
+        Ok(Some(kind)) => {
+            finding(
+                report,
+                "error",
+                "manifest_error",
+                format!(
+                    "ownership state directory '{}' is not a real directory ({kind:?})",
+                    state_dir.display()
+                ),
+            );
+            return;
+        }
+        Err(error) => {
+            finding(
+                report,
+                "error",
+                "manifest_error",
+                format!(
+                    "ownership state directory '{}' could not be inspected: {error}",
+                    state_dir.display()
+                ),
+            );
+            return;
+        }
+    }
+
+    let has_legacy_owner = registry.aliases.values().any(|entry| {
+        entry.agent_dir == agent_dir && entry.manifest_slot == state::ManifestSlot::Legacy
+    });
+    if !has_legacy_owner {
+        match state::manifest_path(agent_dir, state_anchor) {
+            Ok(path) => {
+                inspect_unregistered_manifest(
+                    report,
+                    &path,
+                    agent_dir,
+                    profile,
+                    None,
+                    state_anchor,
+                );
+            }
+            Err(error) => finding(
+                report,
+                "error",
+                "manifest_error",
+                format!(
+                    "ownership data at '{}' could not be inspected: {error}",
+                    agent_dir.display()
+                ),
+            ),
+        }
+    }
+
+    let manifests_rel = format!("{state_dir_rel}/manifests");
+    match root.kind(&manifests_rel) {
+        Ok(None) => return,
+        Ok(Some(EntryKind::Directory)) => {}
+        Ok(Some(kind)) => {
+            finding(
+                report,
+                "error",
+                "manifest_error",
+                format!(
+                    "ownership manifest directory '{}' is not a real directory ({kind:?})",
+                    state_dir.join("manifests").display()
+                ),
+            );
+            return;
+        }
+        Err(error) => {
+            finding(
+                report,
+                "error",
+                "manifest_error",
+                format!(
+                    "ownership manifest directory '{}' could not be inspected: {error}",
+                    state_dir.join("manifests").display()
+                ),
+            );
+            return;
+        }
+    }
+    let entries = match root.list(&manifests_rel) {
+        Ok(entries) => entries,
+        Err(error) => {
+            finding(
+                report,
+                "error",
+                "manifest_error",
+                format!(
+                    "ownership manifest directory '{}' could not be listed: {error}",
+                    state_dir.join("manifests").display()
+                ),
+            );
+            return;
+        }
+    };
+    for (name, _) in entries {
+        let Some(file_name) = name.to_str() else {
+            continue;
+        };
+        let Some(install_id) = file_name.strip_suffix(".json") else {
+            continue;
+        };
+        if install_id.is_empty()
+            || registry.aliases.get(install_id).is_some_and(|entry| {
+                entry.agent_dir == agent_dir && entry.manifest_slot == state::ManifestSlot::PerAlias
+            })
+        {
+            continue;
+        }
+        inspect_unregistered_manifest(
+            report,
+            &state_dir.join("manifests").join(OsStr::new(file_name)),
+            agent_dir,
+            profile,
+            Some(install_id),
+            state_anchor,
+        );
+    }
+}
+
+fn inspect_unregistered_manifest(
+    report: &mut Json,
+    manifest_path: &Path,
+    agent_dir: &Path,
+    profile: Option<&str>,
+    install_id: Option<&str>,
+    state_anchor: &Path,
+) {
+    match state::load_manifest_at(manifest_path, state_anchor) {
         Ok(Some(manifest)) => {
             let topology_name = topology::manifest_topology(&manifest).map(str::to_string);
-            let item = json!({
+            let mut item = json!({
                 "profile": profile,
                 "agent_dir": agent_dir.display().to_string(),
                 "topology": topology_name,
                 "status": "warning",
             });
+            if let Some(install_id) = install_id {
+                item["install_id"] = json!(install_id);
+            }
             report["unregistered"]
                 .as_array_mut()
                 .expect("doctor unregistered is always an array")
                 .push(item);
+            let detail = match (install_id, topology_name.as_deref()) {
+                (Some(id), Some(name)) => {
+                    format!(" for install ID '{id}' and topology '{name}'")
+                }
+                (Some(id), None) => format!(" for install ID '{id}'"),
+                (None, Some(name)) => format!(" for topology '{name}'"),
+                (None, None) => String::new(),
+            };
             finding(
                 report,
                 "warning",
                 "unregistered_data",
                 format!(
-                    "unregistered ownership data{} exists for '{}' and was left untouched",
-                    topology_name
-                        .as_deref()
-                        .map(|name| format!(" for topology '{name}'"))
-                        .unwrap_or_default(),
+                    "unregistered ownership data{detail} exists for '{}' and was left untouched",
                     agent_dir.display()
                 ),
             );
@@ -329,7 +544,7 @@ fn inspect_unregistered(
             "manifest_error",
             format!(
                 "ownership data at '{}' is invalid: {error}",
-                agent_dir.display()
+                manifest_path.display()
             ),
         ),
     }
