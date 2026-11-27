@@ -1,8 +1,8 @@
-//! `omp-topology` command-line entry point.
+//! `omp-profile` command-line entry point.
 //!
 //! Subcommands:
 //!
-//! * `list` — list installable topologies (checkout root or `--source`).
+//! * `list` — list installable topologies from an explicit `--source`.
 //! * `install` — merge a topology into an OMP agent directory and register
 //!   the install under a stable install ID.
 //! * `remove` — remove a topology, restoring prior config values, and
@@ -30,7 +30,9 @@
 // site; no other module may use `unsafe`.
 #[allow(unsafe_code)]
 mod anchored;
+mod completions;
 mod config_mode;
+mod doctor;
 mod error;
 mod fsx;
 mod install;
@@ -48,6 +50,7 @@ mod value;
 mod yamlwork;
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
@@ -63,7 +66,7 @@ const CACHE_KEEP_UNREFERENCED: usize = 10;
 
 /// Install and manage OMP topology profiles.
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
+#[command(name = "omp-profile", version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -85,17 +88,23 @@ enum Command {
     Update(UpdateArgs),
     /// Update this CLI from a signed GitHub Release
     SelfUpdate(SelfUpdateArgs),
+    /// Diagnose local OMP profiles and topology installer state
+    Doctor(DoctorArgs),
+    /// Generate shell completion scripts
+    Completions(CompletionsArgs),
+    #[command(name = "__complete", hide = true)]
+    Complete(InternalCompletionArgs),
 }
 
 #[derive(Args)]
 struct ListArgs {
     /// Topology source: 'github:OWNER/REPO' or a local path containing
-    /// topologies/ (default: the current checkout root)
-    #[arg(long)]
+    /// a root topology.yml package or legacy topologies/ catalog
+    #[arg(long, required = true)]
     source: Option<String>,
     /// Git ref (branch, tag, or full 40-hex SHA) for a GitHub source;
     /// requires --source
-    #[arg(long = "ref")]
+    #[arg(long = "ref", requires = "source")]
     reference: Option<String>,
     /// Emit exactly one JSON document on stdout
     #[arg(long)]
@@ -107,11 +116,12 @@ struct InstallArgs {
     /// Topology name
     #[arg(short, long)]
     topology: String,
-    /// Topology source (default: the current checkout root)
-    #[arg(long)]
+    /// Topology source: 'github:OWNER/REPO' or a local path containing
+    /// a root topology.yml package or legacy topologies/ catalog
+    #[arg(long, required = true)]
     source: Option<String>,
     /// Git ref for a GitHub source; requires --source
-    #[arg(long = "ref")]
+    #[arg(long = "ref", requires = "source")]
     reference: Option<String>,
     /// OMP profile to install into (mutually exclusive with --agent-dir)
     #[arg(long, conflicts_with = "agent_dir")]
@@ -274,6 +284,44 @@ struct SelfUpdateArgs {
     json: bool,
 }
 
+#[derive(Args)]
+struct DoctorArgs {
+    /// Diagnose one registered install ID (mutually exclusive with profile and agent directory)
+    #[arg(
+        long = "install-id",
+        conflicts_with_all = ["profile", "agent_dir"],
+        add = clap_complete::engine::ArgValueCompleter::new(completions::complete_install_ids)
+    )]
+    install_id: Option<String>,
+    /// Diagnose one OMP profile (mutually exclusive with install ID and agent directory)
+    #[arg(
+        long,
+        conflicts_with_all = ["install_id", "agent_dir"],
+        add = clap_complete::engine::ArgValueCompleter::new(completions::complete_profiles)
+    )]
+    profile: Option<String>,
+    /// Diagnose one explicit agent directory
+    #[arg(long, conflicts_with_all = ["install_id", "profile"], value_hint = clap::ValueHint::DirPath)]
+    agent_dir: Option<String>,
+    /// Emit exactly one JSON document on stdout
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct CompletionsArgs {
+    /// Shell to generate for
+    #[arg(value_parser = ["bash", "fish", "zsh"])]
+    shell: String,
+}
+
+#[derive(Args)]
+struct InternalCompletionArgs {
+    /// Current command line words, after `--`
+    #[arg(last = true, num_args = 0.., allow_hyphen_values = true)]
+    words: Vec<OsString>,
+}
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -284,6 +332,9 @@ fn main() -> std::process::ExitCode {
         Command::Status(args) => cmd_status(&args),
         Command::Update(args) => cmd_update(&args),
         Command::SelfUpdate(args) => cmd_self_update(&args),
+        Command::Doctor(args) => cmd_doctor(&args),
+        Command::Completions(args) => cmd_completions(&args),
+        Command::Complete(args) => cmd_complete(args),
     };
     match result {
         Ok(code) => std::process::ExitCode::from(code as u8),
@@ -292,6 +343,29 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(1)
         }
     }
+}
+
+fn cmd_doctor(args: &DoctorArgs) -> Result<i32, CliError> {
+    let anchor = state_anchor()?;
+    doctor::run(
+        args.install_id.as_deref(),
+        args.profile.as_deref(),
+        args.agent_dir.as_deref(),
+        args.json,
+        &anchor,
+    )
+}
+
+fn cmd_completions(args: &CompletionsArgs) -> Result<i32, CliError> {
+    let script = completions::script(&args.shell)
+        .ok_or_else(|| CliError::Usage(format!("unsupported shell '{}'", args.shell)))?;
+    print!("{script}");
+    Ok(0)
+}
+
+fn cmd_complete(args: InternalCompletionArgs) -> Result<i32, CliError> {
+    completions::complete(args.words);
+    Ok(0)
 }
 
 /// Build the per-command config mode from the CLI flag combination.
@@ -322,15 +396,21 @@ fn config_mode_from_flags(
     Ok(config_mode::ConfigMode::Candidate)
 }
 
-/// The stable state anchor for registry and manifest paths: the checkout
-/// root when one is available, otherwise the executable's parent directory
+/// The stable state anchor for registry and manifest paths: the installer
+/// checkout when available, otherwise the executable's parent directory
 /// (an installed binary has no checkout).
-fn state_anchor() -> Result<PathBuf, CliError> {
-    if let Ok(root) = topology::repo_root() {
-        return Ok(root);
+pub(crate) fn state_anchor() -> Result<PathBuf, CliError> {
+    let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if manifest_root.join("Cargo.toml").is_file() {
+        return Ok(manifest_root.to_path_buf());
     }
+
     let exe = std::env::current_exe()
         .map_err(|err| crate::error::io_err(Path::new("current executable"), err))?;
+    if let Some(root) = exe.ancestors().find(|candidate| candidate.join("Cargo.toml").is_file()) {
+        return Ok(root.to_path_buf());
+    }
+
     let parent = exe.parent().ok_or_else(|| {
         CliError::Usage(
             "could not determine the executable directory for installer state; \
@@ -341,22 +421,16 @@ fn state_anchor() -> Result<PathBuf, CliError> {
     Ok(parent.to_path_buf())
 }
 
-/// A topology source for a command: either the current checkout root or a
-/// resolved explicit source. Explicit checkouts stay alive in this value
-/// until the command returns (ephemeral staging is removed on drop).
+/// A topology source for a command. Explicit checkouts stay alive in this
+/// value until the command returns (ephemeral staging is removed on drop).
 enum ResolvedSource {
-    /// The current checkout root; `source` is what the registry records.
-    Checkout { root: PathBuf, source: SourceSpec },
-    /// A resolved `--source` checkout.
     Explicit(SourceCheckout),
 }
 
 impl ResolvedSource {
-    /// Root directory handed to `topology::list_topologies` /
-    /// `install::run` (contains `topologies/`).
+    /// Root directory handed to `topology::list_topologies` / `install::run`.
     fn tree_root(&self) -> &Path {
         match self {
-            ResolvedSource::Checkout { root, .. } => root,
             ResolvedSource::Explicit(checkout) => &checkout.root,
         }
     }
@@ -364,7 +438,6 @@ impl ResolvedSource {
     /// What the registry records as the install source.
     fn source_spec(&self) -> SourceSpec {
         match self {
-            ResolvedSource::Checkout { source, .. } => source.clone(),
             ResolvedSource::Explicit(checkout) => match &checkout.source {
                 TopologySource::GitHub { owner, repo } => SourceSpec::GitHub {
                     owner: owner.clone(),
@@ -378,7 +451,6 @@ impl ResolvedSource {
     /// Pinned commit for GitHub sources; `None` for local sources.
     fn commit(&self) -> Option<&str> {
         match self {
-            ResolvedSource::Checkout { .. } => None,
             ResolvedSource::Explicit(checkout) => checkout.commit.as_deref(),
         }
     }
@@ -396,49 +468,18 @@ fn topology_source(spec: &SourceSpec) -> TopologySource {
     }
 }
 
-/// `--ref` only makes sense against an explicit `--source` (the checkout
-/// root is used exactly as it is on disk).
-fn require_source_for_ref(
-    source: &Option<String>,
-    reference: &Option<String>,
-) -> Result<(), CliError> {
-    if reference.is_some() && source.is_none() {
-        return Err(CliError::Usage(
-            "--ref requires --source SOURCE ('github:OWNER/REPO' or a local \
-             path); installs from the checkout root need no --ref"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Resolve the command's topology source: the checkout root when no
-/// `--source` was passed (with actionable `--source` guidance when no
-/// checkout exists), or a resolved explicit source.
+/// Resolve the explicitly selected topology source.
 fn resolve_source(
     source: &Option<String>,
     reference: Option<&str>,
     cache_root: Option<&Path>,
 ) -> Result<ResolvedSource, CliError> {
-    match source {
-        Some(spec) => Ok(ResolvedSource::Explicit(source::resolve(
-            spec, reference, cache_root,
-        )?)),
-        None => {
-            let root = topology::repo_root().map_err(|err| {
-                CliError::Usage(format!(
-                    "{err}\nno topology checkout is available here; pass \
-                     --source SOURCE ('github:OWNER/REPO' or a local path \
-                     containing topologies/) to list or install from \
-                     an explicit source"
-                ))
-            })?;
-            Ok(ResolvedSource::Checkout {
-                source: SourceSpec::Local { path: root.clone() },
-                root,
-            })
-        }
-    }
+    let spec = source.as_deref().ok_or_else(|| {
+        CliError::Usage("--source is required; provide a local path or github:OWNER/REPO".into())
+    })?;
+    Ok(ResolvedSource::Explicit(source::resolve(
+        spec, reference, cache_root,
+    )?))
 }
 
 /// Print exactly one JSON document on stdout.
@@ -545,7 +586,6 @@ fn manifest_slot_for(
 }
 
 fn cmd_list(args: &ListArgs) -> Result<i32, CliError> {
-    require_source_for_ref(&args.source, &args.reference)?;
     // An explicit source is resolved ephemerally: no persistent cache.
     let resolved = resolve_source(&args.source, args.reference.as_deref(), None)?;
     let topologies = topology::list_topologies(resolved.tree_root())?;
@@ -749,7 +789,7 @@ fn cross_topology_guidance(
          separate target instead: pass --profile {topology} (or \
          --agent-dir PATH) so the two installs do not share files.\n\
          - To update the existing '{owner_topology}' installation, \
-         run: omp-topology update --install-id {owner_install_id}. This \
+         run: omp-profile update --install-id {owner_install_id}. This \
          keeps '{owner_topology}'; it does not install '{topology}'.",
         owner_topology = owner_entry.topology,
         target = agent_dir.display(),
@@ -759,7 +799,6 @@ fn cross_topology_guidance(
 }
 
 fn cmd_install(args: &InstallArgs) -> Result<i32, CliError> {
-    require_source_for_ref(&args.source, &args.reference)?;
     let anchor = state_anchor()?;
     // Validate values derivable without resolving an OMP profile first:
     // `omp --profile NAME config path` can create a missing profile dir.

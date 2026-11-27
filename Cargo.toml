@@ -6,8 +6,13 @@ description = "Install and manage OMP topology profiles"
 license = "Apache-2.0"
 publish = false
 
+[[bin]]
+name = "omp-profile"
+path = "src/main.rs"
+
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
+clap_complete = { version = "4.6", features = ["unstable-dynamic"] }
 # Lossless YAML editing: preserves user comments/formatting during config
 # merge and removal restore; `migrate::to_yaml_1_2` keeps YAML 1.1 scalar
 # meanings (e.g. the topology fixture's `autoParallel: on` stays boolean).
