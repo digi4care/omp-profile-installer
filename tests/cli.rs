@@ -254,6 +254,9 @@ fn install_dry_run_reports_shell_alias_without_creating_it() {
     );
 }
 
+type CliTreeSnapshotEntry = (PathBuf, u8, u32, Vec<u8>);
+type CliTreeSnapshot = Option<Vec<CliTreeSnapshotEntry>>;
+
 fn cli_file_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     fn visit(root: &Path, directory: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
         for entry in fs::read_dir(directory).expect("failed to read snapshot directory") {
@@ -482,8 +485,8 @@ fn doctor_json(output: &Output, expected_code: i32) -> serde_json::Value {
     report
 }
 
-fn cli_tree_snapshot(root: &Path) -> Option<Vec<(PathBuf, u8, u32, Vec<u8>)>> {
-    fn visit(root: &Path, directory: &Path, entries: &mut Vec<(PathBuf, u8, u32, Vec<u8>)>) {
+fn cli_tree_snapshot(root: &Path) -> CliTreeSnapshot {
+    fn visit(root: &Path, directory: &Path, entries: &mut Vec<CliTreeSnapshotEntry>) {
         let mut children = fs::read_dir(directory)
             .expect("failed to read snapshot directory")
             .map(|entry| entry.expect("failed to read snapshot entry").path())
@@ -539,7 +542,7 @@ fn cli_tree_snapshot(root: &Path) -> Option<Vec<(PathBuf, u8, u32, Vec<u8>)>> {
     Some(entries)
 }
 
-fn snapshot_roots(roots: &[PathBuf]) -> Vec<Option<Vec<(PathBuf, u8, u32, Vec<u8>)>>> {
+fn snapshot_roots(roots: &[PathBuf]) -> Vec<CliTreeSnapshot> {
     roots.iter().map(|root| cli_tree_snapshot(root)).collect()
 }
 
@@ -1207,7 +1210,7 @@ fn zsh_completion_candidates(temp: &TestDir, script: &Path, line: &str) -> Strin
     fs::create_dir_all(&zsh_dir).expect("failed to create temporary Zsh fpath");
     fs::copy(script, zsh_dir.join("_omp-topology"))
         .expect("failed to stage Zsh completion in temporary fpath");
-    let mut command = shell_command(temp, "zsh", &script, line);
+    let mut command = shell_command(temp, "zsh", script, line);
     command
         .args([
             "-f",
@@ -1306,7 +1309,7 @@ fn normalized_candidates(raw: &str, query: &str) -> String {
     let mut chars = raw.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' {
-            while let Some(control) = chars.next() {
+            for control in chars.by_ref() {
                 if control.is_ascii_alphabetic() {
                     break;
                 }

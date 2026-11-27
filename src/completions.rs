@@ -126,7 +126,7 @@ fn valid_candidate(candidate: &str, words: &[OsString], current_index: usize) ->
     }
 
     match command {
-        "doctor" => {
+        "doctor" | "status" | "remove" => {
             if has("--install-id") && (is("--profile") || is("--agent-dir"))
                 || has("--profile") && (is("--install-id") || is("--agent-dir"))
                 || has("--agent-dir") && (is("--install-id") || is("--profile"))
@@ -157,14 +157,6 @@ fn valid_candidate(candidate: &str, words: &[OsString], current_index: usize) ->
                 || has("--config-merge") && is("--config-replace")
                 || has("--config-replace") && (is("--config-merge") || is("--config-precedence"))
                 || is("--config-precedence") && !has("--config-merge")
-            {
-                return false;
-            }
-        }
-        "status" | "remove" => {
-            if has("--install-id") && (is("--profile") || is("--agent-dir"))
-                || has("--profile") && (is("--install-id") || is("--agent-dir"))
-                || has("--agent-dir") && (is("--install-id") || is("--profile"))
             {
                 return false;
             }
