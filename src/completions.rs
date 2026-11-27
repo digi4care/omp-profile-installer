@@ -155,11 +155,12 @@ fn valid_candidate(candidate: &str, words: &[OsString], current_index: usize) ->
         "update"
             if is("--ref") && !update_ref_is_github_source(prior)
                 || has("--config-merge") && is("--config-replace")
-                || has("--config-replace") && (is("--config-merge") || is("--config-precedence"))
-                || is("--config-precedence") && !has("--config-merge")
-            => {
-                return false;
-            }
+                || has("--config-replace")
+                    && (is("--config-merge") || is("--config-precedence"))
+                || is("--config-precedence") && !has("--config-merge") =>
+        {
+            return false;
+        }
         _ => {}
     }
     true
