@@ -1,4 +1,7 @@
+use std::ffi::OsString;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -360,6 +363,46 @@ fn completion_command_is_registered() {
     assert!(
         !output.stdout.is_empty(),
         "completions bash emitted an empty script"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hidden_completion_preserves_non_utf8_agent_dir_candidate_bytes() {
+    let temp = TestDir::new();
+    let candidate = temp
+        .0
+        .join(OsString::from_vec(b"candidate-\xff".to_vec()));
+    fs::create_dir(&candidate).expect("failed to create non-UTF-8 agent directory");
+    let prefix = temp.0.join("candidate-");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_omp-topology"))
+        .args([
+            "__complete",
+            "--",
+            "omp-topology",
+            "doctor",
+            "--agent-dir",
+        ])
+        .arg(&prefix)
+        .output()
+        .expect("failed to execute omp-topology __complete");
+
+    assert!(
+        output.status.success(),
+        "__complete failed before producing candidates: {output:?}"
+    );
+    assert!(
+        !output.stdout.is_empty(),
+        "__complete produced no candidates: {output:?}"
+    );
+    let expected = candidate.as_os_str().as_bytes();
+    assert!(
+        output.stdout.split(|byte| *byte == b'\n').any(|line| {
+            line.strip_suffix(b"/").unwrap_or(line) == expected
+        }),
+        "expected exact candidate bytes {expected:?} in output, got {:?}",
+        output.stdout
     );
 }
 
@@ -961,6 +1004,113 @@ fn doctor_reports_stale_per_alias_manifest_with_registered_sibling() {
 }
 
 #[test]
+fn doctor_default_reports_stale_manifest_in_registered_explicit_agent_dir() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let agent_dir = temp.0.join("targets/explicit-agent");
+    write_cli_fixture_topology(&source_root);
+    install_cli_fixture(&temp, &source_root, "registered-explicit-id", &agent_dir, None);
+    let stale_topology = "cli-stale-explicit-fixture";
+    let stale_topology_root = source_root.join("topologies").join(stale_topology);
+    let stale_agent_root = stale_topology_root.join("agent");
+    fs::create_dir_all(stale_agent_root.join("skills"))
+        .expect("failed to create stale fixture topology");
+    fs::write(
+        stale_topology_root.join("topology.yml"),
+        "name: cli-stale-explicit-fixture\nversion: 1.0.0\ndescription: stale fixture\ninstallable: true\n",
+    )
+    .expect("failed to write stale fixture metadata");
+    fs::write(stale_agent_root.join("config.yml"), "stale_fixture: true\n")
+        .expect("failed to write stale fixture config");
+    fs::write(stale_agent_root.join("skills/stale-explicit.md"), b"stale fixture skill\n")
+        .expect("failed to write stale fixture skill");
+    let source_arg = source_root.to_string_lossy().into_owned();
+    let target_arg = agent_dir.to_string_lossy().into_owned();
+    let mut install = temp.cli_command(Path::new(env!("CARGO_MANIFEST_DIR")));
+    install.args([
+        "install",
+        "--topology",
+        stale_topology,
+        "--source",
+        &source_arg,
+        "--install-id",
+        "stale-explicit-id",
+        "--agent-dir",
+        &target_arg,
+    ]);
+    temp.configure_fake_omp(&mut install, &agent_dir, true);
+    let installed = install
+        .output()
+        .expect("failed to execute stale fixture install");
+    assert!(
+        installed.status.success(),
+        "stale fixture install failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&installed.stdout),
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    let registry_path = temp.0.join("state/omp-topology/registry.json");
+    let registry_bytes = fs::read(&registry_path).expect("fixture registry is missing");
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(&registry_bytes).expect("fixture registry is invalid JSON");
+    assert_eq!(
+        registry["aliases"]["registered-explicit-id"]["agent_dir"],
+        fs::canonicalize(&agent_dir)
+            .expect("fixture agent dir is missing")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        registry["aliases"]["stale-explicit-id"]["agent_dir"],
+        registry["aliases"]["registered-explicit-id"]["agent_dir"],
+        "fixture installs did not share the explicit agent directory"
+    );
+
+    let manifest_root = cli_manifest_path(&temp, &agent_dir)
+        .parent()
+        .expect("fixture manifest has no parent")
+        .to_path_buf();
+    let stale_manifest = manifest_root.join("manifests/stale-explicit-id.json");
+    assert!(
+        stale_manifest.is_file(),
+        "stale fixture manifest was not created"
+    );
+    registry["aliases"]
+        .as_object_mut()
+        .expect("fixture registry aliases are missing")
+        .remove("stale-explicit-id")
+        .expect("stale fixture install ID is missing from registry");
+    fs::write(
+        &registry_path,
+        serde_json::to_vec_pretty(&registry).expect("failed to encode stale fixture registry"),
+    )
+    .expect("failed to remove stale fixture ID from registry");
+
+    let output = run_doctor(&temp, &["doctor", "--json"]);
+    let report = doctor_json(&output, 0);
+    let findings = report["findings"]
+        .as_array()
+        .expect("doctor findings are not an array");
+    let warning_text = serde_json::to_string(findings)
+        .expect("failed to encode doctor findings")
+        .to_ascii_lowercase();
+    assert!(
+        report["status"] == "warning"
+            && warning_text.contains("stale-explicit-id")
+            && warning_text.contains("unregistered"),
+        "default scan omitted the stale ownership manifest from its registered explicit agent directory: {report}"
+    );
+    assert!(
+        report["installs"]
+            .as_array()
+            .is_some_and(|installs| installs.iter().any(|install| {
+                install["install_id"] == "registered-explicit-id" && install["status"] == "ok"
+            })),
+        "default scan did not retain the healthy registered install: {report}"
+    );
+}
+
+#[test]
 fn doctor_registry_and_manifest_errors_are_json_and_read_only() {
     let temp = TestDir::new();
     let source_root = temp.0.join("source");
@@ -1239,6 +1389,42 @@ zpty -d omp_completion
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
+fn zsh_completion_inserted_words(temp: &TestDir, script: &Path, line: &str) -> String {
+    let zsh_dir = temp.0.join("zsh-insert-fpath");
+    fs::create_dir_all(temp.0.join("zsh-home")).expect("failed to create isolated Zsh home");
+    fs::create_dir_all(&zsh_dir).expect("failed to create temporary Zsh fpath");
+    fs::copy(script, zsh_dir.join("_omp-topology"))
+        .expect("failed to stage Zsh completion in temporary fpath");
+    let mut command = shell_command(temp, "zsh", script, line);
+    command
+        .args([
+            "-f",
+            "-c",
+            r#"
+zmodload zsh/zpty || exit 81
+zpty -b omp_completion zsh -f -i || exit 82
+zpty -w omp_completion $'PROMPT=\nRPROMPT=\nfpath=("$OMP_COMPLETION_DIR" $fpath)\nautoload -Uz compinit\ncompinit -i -d "$ZDOTDIR/.zcompdump"\nfunction _omp_completion_inspect { local -a parsed; parsed=("${(z)BUFFER}"); print -r -- "__OMP_WORD_COUNT__${#parsed[@]}"; print -r -- "__OMP_LAST_WORD__${parsed[-1]}"; print -r -- "__OMP_PREVIOUS_WORD__${parsed[-2]}"; zle send-break }\nzle -N _omp_completion_inspect\nbindkey "^X^X" _omp_completion_inspect\nprint -r -- __OMP_READY__\n'
+zpty -r omp_completion ready '*__OMP_READY__*' || exit 83
+zpty -w -n omp_completion "$OMP_COMPLETION_LINE"$'\t'
+zpty -w -n omp_completion $'\030\030'
+zpty -r omp_completion inserted_output '*__OMP_PREVIOUS_WORD__*' || exit 84
+print -r -- "$inserted_output"
+zpty -d omp_completion
+"#,
+        ])
+        .env("OMP_COMPLETION_DIR", &zsh_dir);
+    let output = command
+        .output()
+        .expect("failed to run Zsh insertion probe");
+    assert!(
+        output.status.success(),
+        "Zsh insertion probe failed for {line:?}:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 
 fn shell_completion_candidates(temp: &TestDir, shell: &str, script: &Path, line: &str) -> String {
     match shell {
@@ -1652,5 +1838,146 @@ fn completion_update_ref_tracks_effective_source_for_all_shells() {
         failures.is_empty(),
         "update --ref candidates ignored the effective source:\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+fn bash_completion_preserves_profile_names_with_spaces() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let profile_name = "profile with spaces";
+    let profile_agent = temp.0.join("home/.omp/profiles").join(profile_name).join("agent");
+    write_cli_fixture_topology(&source_root);
+    install_cli_fixture(
+        &temp,
+        &source_root,
+        "space-profile",
+        &profile_agent,
+        Some(profile_name),
+    );
+
+    let script = temp.0.join("bash.completion");
+    completion_script(&temp, "bash", &script);
+    let raw = shell_completion_candidates(
+        &temp,
+        "bash",
+        &script,
+        "omp-topology doctor --profile ",
+    );
+
+    assert_eq!(
+        raw,
+        format!("{profile_name}\n"),
+        "Bash must return the profile name as one exact completion candidate"
+    );
+}
+
+#[test]
+fn bash_completion_does_not_overwrite_global_candidate() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let profile_name = "candidate-profile";
+    let profile_agent = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile_name)
+        .join("agent");
+    write_cli_fixture_topology(&source_root);
+    install_cli_fixture(
+        &temp,
+        &source_root,
+        "candidate-profile",
+        &profile_agent,
+        Some(profile_name),
+    );
+
+    let script = temp.0.join("bash.completion");
+    completion_script(&temp, "bash", &script);
+    let mut command = shell_command(
+        &temp,
+        "bash",
+        &script,
+        "omp-topology doctor --profile ",
+    );
+    command.args([
+        "--noprofile",
+        "--norc",
+        "-c",
+        r#"
+source "$OMP_COMPLETION_SCRIPT" || exit 81
+COMP_LINE="$OMP_COMPLETION_LINE"
+COMP_POINT=${#COMP_LINE}
+COMP_TYPE=9
+read -r -a COMP_WORDS <<< "$COMP_LINE"
+if [[ "$COMP_LINE" == *" " ]]; then COMP_WORDS+=(""); fi
+COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+registration=$(complete -p omp-topology 2>/dev/null) || exit 82
+read -r -a registration_words <<< "$registration"
+completion_function=""
+for ((i = 0; i < ${#registration_words[@]}; i++)); do
+  if [[ "${registration_words[i]}" == "-F" ]]; then
+    completion_function="${registration_words[i + 1]}"
+    break
+  fi
+done
+[[ -n "$completion_function" ]] || exit 83
+candidate=sentinel
+"$completion_function"
+printf 'GLOBAL:%s\n' "$candidate"
+printf 'COMPREPLY:%s\n' "${COMPREPLY[@]}"
+"#,
+    ]);
+    let output = command
+        .output()
+        .expect("failed to run Bash completion global-variable probe");
+    assert!(
+        output.status.success(),
+        "Bash completion probe failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == format!("COMPREPLY:{profile_name}")),
+        "Bash did not return the expected profile candidate; probe output:\n{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "GLOBAL:sentinel"),
+        "Bash completion overwrote the caller's global candidate; probe output:\n{stdout}"
+    );
+}
+
+#[test]
+fn zsh_completion_inserts_profile_names_with_spaces_as_one_word() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let profile_name = "profile with spaces";
+    let profile_agent = temp.0.join("home/.omp/profiles").join(profile_name).join("agent");
+    write_cli_fixture_topology(&source_root);
+    install_cli_fixture(
+        &temp,
+        &source_root,
+        "space-profile",
+        &profile_agent,
+        Some(profile_name),
+    );
+
+    let script = temp.0.join("zsh.completion");
+    completion_script(&temp, "zsh", &script);
+    let output = zsh_completion_inserted_words(
+        &temp,
+        &script,
+        "omp-topology doctor --profile ",
+    );
+
+    assert!(
+        output.contains("__OMP_WORD_COUNT__4"),
+        "expected completed profile to remain one shell word; ZLE parsed:\n{output}"
+    );
+    assert!(
+        output.contains("__OMP_LAST_WORD__profile\\ with\\ spaces"),
+        "expected final parsed word to be the complete escaped profile name; ZLE parsed:\n{output}"
     );
 }

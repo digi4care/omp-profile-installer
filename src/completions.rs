@@ -5,6 +5,8 @@
 //! removes candidates that would violate relationships enforced by the CLI.
 
 use std::ffi::{OsStr, OsString};
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use clap_complete::engine::{self, CompletionCandidate};
@@ -15,7 +17,11 @@ pub(crate) fn script(shell: &str) -> Option<&'static str> {
     match shell {
         "bash" => Some(
             r#"_omp_topology_complete() {
-    COMPREPLY=( $(command omp-topology __complete -- "${COMP_WORDS[@]:1}") )
+    local candidate
+    COMPREPLY=()
+    while IFS= read -r candidate; do
+        COMPREPLY+=("$candidate")
+    done < <(command omp-topology __complete -- "${COMP_WORDS[@]:1}")
 }
 complete -o nosort -F _omp_topology_complete omp-topology
 "#,
@@ -38,7 +44,7 @@ complete -c omp-topology -f -a '(__omp_topology_complete)'
 local -a candidates completion_words
 completion_words=("${(@)words[2,CURRENT]}")
 candidates=("${(@f)$(command omp-topology __complete -- "${completion_words[@]}")}")
-compadd -Q -- "${candidates[@]}"
+compadd -- "${candidates[@]}"
 "#,
         ),
         _ => None,
@@ -92,12 +98,15 @@ pub(crate) fn complete(words: Vec<OsString>) {
         current_dir.as_deref(),
     )
     .unwrap_or_default();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
     for candidate in candidates {
-        let value = candidate.get_value().to_string_lossy();
-        if !valid_candidate(&value, &words, current_index) {
+        let value = candidate.get_value();
+        if !valid_candidate(value, &words, current_index) {
             continue;
         }
-        println!("{value}");
+        let _ = out.write_all(value.as_bytes());
+        let _ = out.write_all(b"\n");
     }
 }
 
@@ -111,7 +120,7 @@ fn normalize_words(mut words: Vec<OsString>) -> Vec<OsString> {
     words
 }
 
-fn valid_candidate(candidate: &str, words: &[OsString], current_index: usize) -> bool {
+fn valid_candidate(candidate: &OsStr, words: &[OsString], current_index: usize) -> bool {
     let prior = words.get(1..current_index).unwrap_or_default();
     let command = prior
         .iter()
@@ -119,9 +128,9 @@ fn valid_candidate(candidate: &str, words: &[OsString], current_index: usize) ->
         .find(|word| !word.starts_with('-'))
         .unwrap_or_default();
     let has = |option: &str| option_present(prior, option);
-    let is = |option: &str| candidate == option;
+    let is = |option: &str| candidate == OsStr::new(option);
 
-    if has(candidate) {
+    if candidate.to_str().is_some_and(|candidate| has(candidate)) {
         return false;
     }
 
