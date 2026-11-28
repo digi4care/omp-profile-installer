@@ -130,7 +130,7 @@ fn valid_candidate(candidate: &OsStr, words: &[OsString], current_index: usize) 
     let has = |option: &str| option_present(prior, option);
     let is = |option: &str| candidate == OsStr::new(option);
 
-    if candidate.to_str().is_some_and(|candidate| has(candidate)) {
+    if candidate.to_str().is_some_and(&has) {
         return false;
     }
 

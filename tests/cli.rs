@@ -370,20 +370,12 @@ fn completion_command_is_registered() {
 #[test]
 fn hidden_completion_preserves_non_utf8_agent_dir_candidate_bytes() {
     let temp = TestDir::new();
-    let candidate = temp
-        .0
-        .join(OsString::from_vec(b"candidate-\xff".to_vec()));
+    let candidate = temp.0.join(OsString::from_vec(b"candidate-\xff".to_vec()));
     fs::create_dir(&candidate).expect("failed to create non-UTF-8 agent directory");
     let prefix = temp.0.join("candidate-");
 
     let output = Command::new(env!("CARGO_BIN_EXE_omp-topology"))
-        .args([
-            "__complete",
-            "--",
-            "omp-topology",
-            "doctor",
-            "--agent-dir",
-        ])
+        .args(["__complete", "--", "omp-topology", "doctor", "--agent-dir"])
         .arg(&prefix)
         .output()
         .expect("failed to execute omp-topology __complete");
@@ -398,9 +390,10 @@ fn hidden_completion_preserves_non_utf8_agent_dir_candidate_bytes() {
     );
     let expected = candidate.as_os_str().as_bytes();
     assert!(
-        output.stdout.split(|byte| *byte == b'\n').any(|line| {
-            line.strip_suffix(b"/").unwrap_or(line) == expected
-        }),
+        output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .any(|line| { line.strip_suffix(b"/").unwrap_or(line) == expected }),
         "expected exact candidate bytes {expected:?} in output, got {:?}",
         output.stdout
     );
@@ -1009,7 +1002,13 @@ fn doctor_default_reports_stale_manifest_in_registered_explicit_agent_dir() {
     let source_root = temp.0.join("source");
     let agent_dir = temp.0.join("targets/explicit-agent");
     write_cli_fixture_topology(&source_root);
-    install_cli_fixture(&temp, &source_root, "registered-explicit-id", &agent_dir, None);
+    install_cli_fixture(
+        &temp,
+        &source_root,
+        "registered-explicit-id",
+        &agent_dir,
+        None,
+    );
     let stale_topology = "cli-stale-explicit-fixture";
     let stale_topology_root = source_root.join("topologies").join(stale_topology);
     let stale_agent_root = stale_topology_root.join("agent");
@@ -1022,8 +1021,11 @@ fn doctor_default_reports_stale_manifest_in_registered_explicit_agent_dir() {
     .expect("failed to write stale fixture metadata");
     fs::write(stale_agent_root.join("config.yml"), "stale_fixture: true\n")
         .expect("failed to write stale fixture config");
-    fs::write(stale_agent_root.join("skills/stale-explicit.md"), b"stale fixture skill\n")
-        .expect("failed to write stale fixture skill");
+    fs::write(
+        stale_agent_root.join("skills/stale-explicit.md"),
+        b"stale fixture skill\n",
+    )
+    .expect("failed to write stale fixture skill");
     let source_arg = source_root.to_string_lossy().into_owned();
     let target_arg = agent_dir.to_string_lossy().into_owned();
     let mut install = temp.cli_command(Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -1413,9 +1415,7 @@ zpty -d omp_completion
 "#,
         ])
         .env("OMP_COMPLETION_DIR", &zsh_dir);
-    let output = command
-        .output()
-        .expect("failed to run Zsh insertion probe");
+    let output = command.output().expect("failed to run Zsh insertion probe");
     assert!(
         output.status.success(),
         "Zsh insertion probe failed for {line:?}:\nstdout:\n{}\nstderr:\n{}",
@@ -1424,7 +1424,6 @@ zpty -d omp_completion
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
-
 
 fn shell_completion_candidates(temp: &TestDir, shell: &str, script: &Path, line: &str) -> String {
     match shell {
@@ -1846,7 +1845,11 @@ fn bash_completion_preserves_profile_names_with_spaces() {
     let temp = TestDir::new();
     let source_root = temp.0.join("source");
     let profile_name = "profile with spaces";
-    let profile_agent = temp.0.join("home/.omp/profiles").join(profile_name).join("agent");
+    let profile_agent = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile_name)
+        .join("agent");
     write_cli_fixture_topology(&source_root);
     install_cli_fixture(
         &temp,
@@ -1858,12 +1861,7 @@ fn bash_completion_preserves_profile_names_with_spaces() {
 
     let script = temp.0.join("bash.completion");
     completion_script(&temp, "bash", &script);
-    let raw = shell_completion_candidates(
-        &temp,
-        "bash",
-        &script,
-        "omp-topology doctor --profile ",
-    );
+    let raw = shell_completion_candidates(&temp, "bash", &script, "omp-topology doctor --profile ");
 
     assert_eq!(
         raw,
@@ -1893,12 +1891,7 @@ fn bash_completion_does_not_overwrite_global_candidate() {
 
     let script = temp.0.join("bash.completion");
     completion_script(&temp, "bash", &script);
-    let mut command = shell_command(
-        &temp,
-        "bash",
-        &script,
-        "omp-topology doctor --profile ",
-    );
+    let mut command = shell_command(&temp, "bash", &script, "omp-topology doctor --profile ");
     command.args([
         "--noprofile",
         "--norc",
@@ -1954,7 +1947,11 @@ fn zsh_completion_inserts_profile_names_with_spaces_as_one_word() {
     let temp = TestDir::new();
     let source_root = temp.0.join("source");
     let profile_name = "profile with spaces";
-    let profile_agent = temp.0.join("home/.omp/profiles").join(profile_name).join("agent");
+    let profile_agent = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile_name)
+        .join("agent");
     write_cli_fixture_topology(&source_root);
     install_cli_fixture(
         &temp,
@@ -1966,11 +1963,7 @@ fn zsh_completion_inserts_profile_names_with_spaces_as_one_word() {
 
     let script = temp.0.join("zsh.completion");
     completion_script(&temp, "zsh", &script);
-    let output = zsh_completion_inserted_words(
-        &temp,
-        &script,
-        "omp-topology doctor --profile ",
-    );
+    let output = zsh_completion_inserted_words(&temp, &script, "omp-topology doctor --profile ");
 
     assert!(
         output.contains("__OMP_WORD_COUNT__4"),
