@@ -392,9 +392,42 @@ fn hidden_completion_preserves_non_utf8_agent_dir_candidate_bytes() {
     assert!(
         output
             .stdout
-            .split(|byte| *byte == b'\n')
-            .any(|line| { line.strip_suffix(b"/").unwrap_or(line) == expected }),
-        "expected exact candidate bytes {expected:?} in output, got {:?}",
+            .split(|byte| *byte == b'\0')
+            .any(|record| { record.strip_suffix(b"/").unwrap_or(record) == expected }),
+        "expected exact candidate bytes {expected:?} in NUL-delimited output, got {:?}",
+        output.stdout
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hidden_completion_preserves_newline_agent_dir_candidate_bytes() {
+    let temp = TestDir::new();
+    let candidate = temp.0.join("candidate-\nname");
+    fs::create_dir(&candidate).expect("failed to create newline agent directory");
+    let prefix = temp.0.join("candidate-");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_omp-topology"))
+        .args(["__complete", "--", "omp-topology", "doctor", "--agent-dir"])
+        .arg(&prefix)
+        .output()
+        .expect("failed to execute omp-topology __complete");
+
+    assert!(
+        output.status.success(),
+        "__complete failed before producing candidates: {output:?}"
+    );
+    assert!(
+        !output.stdout.is_empty(),
+        "__complete produced no candidates: {output:?}"
+    );
+    let expected = candidate.as_os_str().as_bytes();
+    assert!(
+        output
+            .stdout
+            .split(|byte| *byte == b'\0')
+            .any(|record| { record.strip_suffix(b"/").unwrap_or(record) == expected }),
+        "expected exact candidate bytes {expected:?} in NUL-delimited output, got {:?}",
         output.stdout
     );
 }
@@ -1867,6 +1900,74 @@ fn bash_completion_preserves_profile_names_with_spaces() {
         raw,
         format!("{profile_name}\n"),
         "Bash must return the profile name as one exact completion candidate"
+    );
+}
+
+#[test]
+fn bash_completion_handles_trailing_space_without_empty_word() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let profile_name = "trailing-space-profile";
+    let profile_agent = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile_name)
+        .join("agent");
+    write_cli_fixture_topology(&source_root);
+    install_cli_fixture(
+        &temp,
+        &source_root,
+        "trailing-space-profile",
+        &profile_agent,
+        Some(profile_name),
+    );
+
+    let script = temp.0.join("bash.completion");
+    completion_script(&temp, "bash", &script);
+    let mut command = shell_command(&temp, "bash", &script, "omp-topology doctor --profile ");
+    command.args([
+        "--noprofile",
+        "--norc",
+        "-c",
+        r#"
+source "$OMP_COMPLETION_SCRIPT" || exit 81
+COMP_LINE="$OMP_COMPLETION_LINE"
+COMP_POINT=${#COMP_LINE}
+COMP_TYPE=9
+read -r -a COMP_WORDS <<< "$COMP_LINE"
+COMP_CWORD=${#COMP_WORDS[@]}
+[[ "$COMP_LINE" == *" " ]] || exit 84
+[[ ${#COMP_WORDS[@]} -eq COMP_CWORD ]] || exit 85
+[[ "${COMP_WORDS[*]}" == "omp-topology doctor --profile" ]] || exit 86
+registration=$(complete -p omp-topology 2>/dev/null) || exit 82
+read -r -a registration_words <<< "$registration"
+completion_function=""
+for ((i = 0; i < ${#registration_words[@]}; i++)); do
+  if [[ "${registration_words[i]}" == "-F" ]]; then
+    completion_function="${registration_words[i + 1]}"
+    break
+  fi
+done
+[[ -n "$completion_function" ]] || exit 83
+"$completion_function"
+printf 'COMPREPLY:%s\n' "${COMPREPLY[@]}"
+"#,
+    ]);
+    let output = command
+        .output()
+        .expect("failed to run Bash trailing-space completion probe");
+    assert!(
+        output.status.success(),
+        "Bash completion probe failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == format!("COMPREPLY:{profile_name}")),
+        "Bash did not return the expected profile candidate in COMPREPLY; probe output:\n{stdout}"
     );
 }
 

@@ -18,10 +18,14 @@ pub(crate) fn script(shell: &str) -> Option<&'static str> {
         "bash" => Some(
             r#"_omp_topology_complete() {
     local candidate
+    local -a words=("${COMP_WORDS[@]:1}")
+    if (( COMP_CWORD >= ${#COMP_WORDS[@]} )); then
+        words+=("")
+    fi
     COMPREPLY=()
-    while IFS= read -r candidate; do
+    while IFS= read -r -d '' candidate; do
         COMPREPLY+=("$candidate")
-    done < <(command omp-topology __complete -- "${COMP_WORDS[@]:1}")
+    done < <(command omp-topology __complete -- "${words[@]}")
 }
 complete -o nosort -F _omp_topology_complete omp-topology
 "#,
@@ -33,7 +37,7 @@ complete -o nosort -F _omp_topology_complete omp-topology
     if test (count $current) -eq 0
         set current ''
     end
-    command omp-topology __complete -- $words "$current"
+    command omp-topology __complete -- $words "$current" | string split0
 end
 complete -c omp-topology -f -a '(__omp_topology_complete)'
 "#,
@@ -41,9 +45,13 @@ complete -c omp-topology -f -a '(__omp_topology_complete)'
         "zsh" => Some(
             r#"#compdef omp-topology
 
+local candidate
 local -a candidates completion_words
 completion_words=("${(@)words[2,CURRENT]}")
-candidates=("${(@f)$(command omp-topology __complete -- "${completion_words[@]}")}")
+candidates=()
+while IFS= read -r -d "" candidate; do
+    candidates+=("$candidate")
+done < <(command omp-topology __complete -- "${completion_words[@]}")
 compadd -- "${candidates[@]}"
 "#,
         ),
@@ -106,7 +114,7 @@ pub(crate) fn complete(words: Vec<OsString>) {
             continue;
         }
         let _ = out.write_all(value.as_bytes());
-        let _ = out.write_all(b"\n");
+        let _ = out.write_all(b"\0");
     }
 }
 
