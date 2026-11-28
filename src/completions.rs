@@ -18,16 +18,41 @@ pub(crate) fn script(shell: &str) -> Option<&'static str> {
         "bash" => Some(
             r#"_omp_topology_complete() {
     local candidate
-    local -a words=("${COMP_WORDS[@]:1}")
+    local -a words=("${COMP_WORDS[@]:1:COMP_CWORD}")
     if (( COMP_CWORD >= ${#COMP_WORDS[@]} )); then
         words+=("")
     fi
+    local -a normalized_words=()
+    local i last_index
+    for ((i = 0; i < ${#words[@]}; i++)); do
+        if [[ ${words[i]} == "=" ]] && (( ${#normalized_words[@]} > 0 )); then
+            last_index=$((${#normalized_words[@]} - 1))
+            if [[ ${normalized_words[last_index]} == -* ]]; then
+                # COMP_WORDBREAKS splits "--option=value-prefix" into
+                # "--option", "=", and the value prefix; drop the standalone
+                # "=" so the engine completes the value prefix as the current
+                # word instead of returning "--option=value".
+                :
+            else
+                # A later "=" belongs to the value itself (e.g. "a=b"); rejoin
+                # it with the surrounding words.
+                normalized_words[last_index]+="="
+                if (( i + 1 < ${#words[@]} )); then
+                    normalized_words[last_index]+="${words[i + 1]}"
+                    i=$((i + 1))
+                fi
+            fi
+        else
+            normalized_words+=("${words[i]}")
+        fi
+    done
+    words=("${normalized_words[@]}")
     COMPREPLY=()
     while IFS= read -r -d '' candidate; do
         COMPREPLY+=("$candidate")
     done < <(command omp-topology __complete -- "${words[@]}")
 }
-complete -o nosort -F _omp_topology_complete omp-topology
+complete -o nosort -o filenames -F _omp_topology_complete omp-topology
 "#,
         ),
         "fish" => Some(

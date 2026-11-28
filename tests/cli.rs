@@ -1,10 +1,11 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn run_cli(args: &[&str]) -> Output {
@@ -1903,6 +1904,142 @@ fn bash_completion_preserves_profile_names_with_spaces() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn bash_completion_quotes_profile_on_actual_insertion() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let profile_name = "profile with spaces";
+    let profile_agent = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile_name)
+        .join("agent");
+    write_cli_fixture_topology(&source_root);
+    install_cli_fixture(
+        &temp,
+        &source_root,
+        "space-profile",
+        &profile_agent,
+        Some(profile_name),
+    );
+
+    let script_path = temp.0.join("bash.completion");
+    completion_script(&temp, "bash", &script_path);
+    let mut command = shell_command(&temp, "script", &script_path, "");
+    command
+        .args(["-qefc", "bash --noprofile --norc -i", "/dev/null"])
+        .env("TERM", "dumb")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("failed to start Bash under a PTY");
+    let input = concat!(
+        "source \"$OMP_COMPLETION_SCRIPT\" || exit 81\n",
+        "__omp_inspect_completion() {\n",
+        "  local -a parsed\n",
+        "  eval \"parsed=( $READLINE_LINE )\"\n",
+        "  printf '\\n__OMP_WORD_COUNT__%d\\n' \"${#parsed[@]}\"\n",
+        "  printf '__OMP_PROFILE_ARG__%s\\n' \"${parsed[3]-<missing>}\"\n",
+        "  READLINE_LINE='exit 0'\n",
+        "  READLINE_POINT=${#READLINE_LINE}\n",
+        "}\n",
+        "bind -x '\"\\C-x\\C-x\":__omp_inspect_completion' || exit 82\n",
+        "omp-topology doctor --profile pro\t\x18\x18\n",
+    );
+    child
+        .stdin
+        .take()
+        .expect("PTY input was not piped")
+        .write_all(input.as_bytes())
+        .expect("failed to send interactive Bash input");
+    let output = child
+        .wait_with_output()
+        .expect("failed to collect interactive Bash output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "interactive Bash completion probe failed:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_lines = stdout.lines().map(|line| line.trim_end_matches('\r'));
+    let markers: Vec<_> = output_lines.collect();
+    assert!(
+        markers.contains(&"__OMP_WORD_COUNT__4"),
+        "profile completion should parse as four shell words; PTY output:\n{stdout}"
+    );
+    assert!(
+        markers.contains(&"__OMP_PROFILE_ARG__profile with spaces"),
+        "the profile argument should retain its full value; PTY output:\n{stdout}"
+    );
+}
+
+#[test]
+fn bash_completion_handles_profile_equals_wordbreak() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let profile_name = "design-profile";
+    let profile_agent = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile_name)
+        .join("agent");
+    write_cli_fixture_topology(&source_root);
+    install_cli_fixture(
+        &temp,
+        &source_root,
+        "design-profile",
+        &profile_agent,
+        Some(profile_name),
+    );
+
+    let script = temp.0.join("bash.completion");
+    completion_script(&temp, "bash", &script);
+    let mut command = shell_command(&temp, "bash", &script, "");
+    command.args([
+        "--noprofile",
+        "--norc",
+        "-c",
+        r#"
+source "$OMP_COMPLETION_SCRIPT" || exit 81
+COMP_WORDS=(omp-topology doctor --profile = des)
+COMP_CWORD=4
+COMP_LINE="omp-topology doctor --profile=des"
+COMP_POINT=${#COMP_LINE}
+COMP_TYPE=9
+[[ ${#COMP_WORDS[@]} -eq 5 && "${COMP_WORDS[3]}" == "=" && "${COMP_WORDS[4]}" == "des" ]] || exit 87
+registration=$(complete -p omp-topology 2>/dev/null) || exit 82
+read -r -a registration_words <<< "$registration"
+completion_function=""
+for ((i = 0; i < ${#registration_words[@]}; i++)); do
+  if [[ "${registration_words[i]}" == "-F" ]]; then
+    completion_function="${registration_words[i + 1]}"
+    break
+  fi
+done
+[[ -n "$completion_function" ]] || exit 83
+"$completion_function"
+printf 'COMPREPLY:%s\n' "${COMPREPLY[@]}"
+"#,
+    ]);
+    let output = command
+        .output()
+        .expect("failed to run Bash equals-wordbreak completion probe");
+    assert!(
+        output.status.success(),
+        "Bash completion probe failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "COMPREPLY:design-profile"),
+        "Bash did not return the expected profile candidate for the equals-wordbreak input; probe output:\n{stdout}"
+    );
+}
+
 #[test]
 fn bash_completion_handles_trailing_space_without_empty_word() {
     let temp = TestDir::new();
@@ -1968,6 +2105,76 @@ printf 'COMPREPLY:%s\n' "${COMPREPLY[@]}"
             .lines()
             .any(|line| line == format!("COMPREPLY:{profile_name}")),
         "Bash did not return the expected profile candidate in COMPREPLY; probe output:\n{stdout}"
+    );
+}
+
+#[test]
+fn bash_completion_ignores_words_after_cursor() {
+    let temp = TestDir::new();
+    let source_root = temp.0.join("source");
+    let profile_name = "cursor-profile";
+    let profile_agent = temp
+        .0
+        .join("home/.omp/profiles")
+        .join(profile_name)
+        .join("agent");
+    let tail_agent_dir = temp.0.join("tail-agent-dir");
+    write_cli_fixture_topology(&source_root);
+    install_cli_fixture(
+        &temp,
+        &source_root,
+        "cursor-profile",
+        &profile_agent,
+        Some(profile_name),
+    );
+    fs::create_dir_all(&tail_agent_dir).expect("failed to create tail agent directory");
+
+    let script = temp.0.join("bash.completion");
+    completion_script(&temp, "bash", &script);
+    let mut command = shell_command(&temp, "bash", &script, "");
+    command
+        .env("OMP_COMPLETION_TAIL_PATH", &tail_agent_dir)
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            r#"
+source "$OMP_COMPLETION_SCRIPT" || exit 81
+COMP_WORDS=(omp-topology doctor --profile "" --agent-dir "$OMP_COMPLETION_TAIL_PATH")
+COMP_CWORD=3
+COMP_LINE="omp-topology doctor --profile \"\" --agent-dir $OMP_COMPLETION_TAIL_PATH"
+cursor_prefix='omp-topology doctor --profile ""'
+COMP_POINT=${#cursor_prefix}
+COMP_TYPE=9
+registration=$(complete -p omp-topology 2>/dev/null) || exit 82
+read -r -a registration_words <<< "$registration"
+completion_function=""
+for ((i = 0; i < ${#registration_words[@]}; i++)); do
+  if [[ "${registration_words[i]}" == "-F" ]]; then
+    completion_function="${registration_words[i + 1]}"
+    break
+  fi
+done
+[[ -n "$completion_function" ]] || exit 83
+"$completion_function"
+printf 'COMPREPLY:%s\n' "${COMPREPLY[@]}"
+"#,
+        ]);
+    let output = command
+        .output()
+        .expect("failed to run Bash mid-line completion probe");
+    assert!(
+        output.status.success(),
+        "Bash completion probe failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == format!("COMPREPLY:{profile_name}")),
+        "Bash did not return the profile candidate before the post-cursor words; probe output:\n{stdout}"
     );
 }
 
